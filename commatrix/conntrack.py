@@ -8,8 +8,9 @@ kernel's own facilities (no libpcap / tcpdump):
   currently tracked connections, so very short flows may be missed between
   polls.
 * ``conntrack-events`` -- stream ``conntrack -E`` (from ``conntrack-tools`` when
-  installed).  ``[DESTROY]`` events carry final byte/packet counters, which is
-  more reliable for short-lived flows.  Auto-detected and optional.
+  already present on the host).  Optional; never installed by commatrix.
+* ``sockets`` -- derive flows from ``/proc/net/{tcp,udp}`` when conntrack procfs
+  is unavailable (no extra packages; byte counts are zero).
 
 For byte/packet accounting the kernel must have accounting enabled::
 
@@ -24,6 +25,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, Optional
+
+from .sockets import SocketEntry, read_all_sockets
 
 PROC_CONNTRACK = "/proc/net/nf_conntrack"
 
@@ -236,13 +239,50 @@ def proc_available(path: str = PROC_CONNTRACK) -> bool:
     return os.path.exists(path)
 
 
+def entries_from_sockets(sockets: Optional[List[SocketEntry]] = None) -> List[ConntrackEntry]:
+    """Build pseudo-conntrack rows from ``/proc/net/{tcp,udp}`` socket tables."""
+
+    if sockets is None:
+        sockets = read_all_sockets()
+    entries: List[ConntrackEntry] = []
+    for sock in sockets:
+        if sock.is_listening:
+            continue
+        if sock.remote_port == 0 and sock.local_port == 0:
+            continue
+        entries.append(
+            ConntrackEntry(
+                l4proto=sock.proto,
+                state=sock.state if sock.proto == "tcp" else None,
+                orig_src=sock.local_ip,
+                orig_dst=sock.remote_ip,
+                orig_sport=sock.local_port,
+                orig_dport=sock.remote_port,
+                orig_bytes=0,
+                orig_packets=0,
+                reply_src=sock.remote_ip,
+                reply_dst=sock.local_ip,
+                reply_sport=sock.remote_port,
+                reply_dport=sock.local_port,
+                reply_bytes=0,
+                reply_packets=0,
+            )
+        )
+    return entries
+
+
+def read_socket_entries() -> List[ConntrackEntry]:
+    """Snapshot active sockets via procfs only (no conntrack dependency)."""
+
+    return entries_from_sockets()
+
+
 def read_conntrack_list(binary: str = "conntrack") -> List[ConntrackEntry]:
-    """Snapshot currently tracked flows via ``conntrack -L`` (conntrack-tools)."""
+    """Snapshot currently tracked flows via ``conntrack -L`` when already installed."""
 
     if not conntrack_tool_available(binary):
         raise FileNotFoundError(
-            "the 'conntrack' binary is not installed; install conntrack-tools "
-            "or enable CONFIG_NF_CONNTRACK_PROCFS"
+            "the 'conntrack' binary is not installed on this host"
         )
     proc = subprocess.run(
         [binary, "-L", "-o", "extended"],
@@ -257,20 +297,56 @@ def read_conntrack_list(binary: str = "conntrack") -> List[ConntrackEntry]:
     return parse_conntrack_text(proc.stdout)
 
 
+def _try_read_conntrack_list() -> Optional[List[ConntrackEntry]]:
+    if not conntrack_tool_available():
+        return None
+    try:
+        return read_conntrack_list()
+    except (RuntimeError, OSError):
+        return None
+
+
 def read_conntrack_snapshot(source: str = "auto") -> List[ConntrackEntry]:
-    """Read the current conntrack table using the best available backend."""
+    """Read the current flow table using the best available backend (no installs)."""
 
     effective = resolve_source(source)
     if effective == "procfs":
         if proc_available():
             return read_proc_conntrack()
-        if conntrack_tool_available():
-            return read_conntrack_list()
-        raise FileNotFoundError(
-            f"{PROC_CONNTRACK} not found and conntrack-tools is not installed"
-        )
+        listed = _try_read_conntrack_list()
+        if listed is not None:
+            return listed
+        return read_socket_entries()
     if effective == "conntrack-events":
-        return read_conntrack_list()
+        listed = _try_read_conntrack_list()
+        if listed is not None:
+            return listed
+        if proc_available():
+            return read_proc_conntrack()
+        return read_socket_entries()
+    if effective == "sockets":
+        return read_socket_entries()
+    raise ValueError(f"unknown conntrack source: {effective!r}")
+
+
+def capture_backend(source: str = "auto") -> str:
+    """Return the backend :func:`read_conntrack_snapshot` would use."""
+
+    effective = resolve_source(source)
+    if effective == "procfs":
+        if proc_available():
+            return "procfs"
+        if conntrack_tool_available():
+            return "conntrack-list"
+        return "sockets"
+    if effective == "conntrack-events":
+        if conntrack_tool_available():
+            return "conntrack-list"
+        if proc_available():
+            return "procfs"
+        return "sockets"
+    if effective == "sockets":
+        return "sockets"
     raise ValueError(f"unknown conntrack source: {effective!r}")
 
 
@@ -293,10 +369,10 @@ def conntrack_tool_available(binary: str = "conntrack") -> bool:
 def resolve_source(preferred: str) -> str:
     """Resolve the effective capture source.
 
-    * ``auto`` -> ``procfs`` when ``/proc/net/nf_conntrack`` exists, otherwise
-      ``conntrack -L`` via conntrack-tools (needed when ``CONFIG_NF_CONNTRACK_PROCFS``
-      is disabled).
-    * ``procfs`` / ``conntrack-events`` -> validated and returned as-is.
+    * ``auto`` -> ``procfs`` when ``/proc/net/nf_conntrack`` exists, else
+      ``conntrack -L`` when the distro already ships ``conntrack``, else
+      ``/proc/net/{tcp,udp}`` socket tables (always available, no byte counts).
+    * ``procfs`` / ``conntrack-events`` / ``sockets`` -> validated as-is.
     """
 
     if preferred == "auto":
@@ -304,8 +380,8 @@ def resolve_source(preferred: str) -> str:
             return "procfs"
         if conntrack_tool_available():
             return "conntrack-events"
-        return "procfs"
-    if preferred in ("procfs", "conntrack-events"):
+        return "sockets"
+    if preferred in ("procfs", "conntrack-events", "sockets"):
         return preferred
     raise ValueError(f"unknown conntrack source: {preferred!r}")
 
@@ -322,8 +398,7 @@ def iter_conntrack_events(
 
     if not conntrack_tool_available(binary):
         raise FileNotFoundError(
-            "the 'conntrack' binary is not installed; install conntrack-tools "
-            "or use the procfs source"
+            "the 'conntrack' binary is not installed on this host"
         )
 
     args = [binary, "-E", "-o", "timestamp,extended"]

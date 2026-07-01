@@ -41,6 +41,7 @@ class Collector:
         self.signatures: Signatures = load_signatures(config.signatures_dir)
         self._dns_cache: Dict[str, Optional[str]] = {}
         self._accounting_warned = False
+        self.capture_backend = ct.capture_backend(config.source)
 
     # -- socket / process context --------------------------------------
     def _socket_indexes(
@@ -144,7 +145,9 @@ class Collector:
                 peer_name = self._reverse_dns(flow.peer_ip)
 
             data_quality = None
-            if not accounting or (agg.snapshot_bytes == 0 and agg.snapshot_packets == 0):
+            if self.capture_backend == "sockets":
+                data_quality = "socket-snapshot"
+            elif not accounting or (agg.snapshot_bytes == 0 and agg.snapshot_packets == 0):
                 data_quality = "no-accounting"
 
             edges.append(
@@ -253,10 +256,16 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     rsrc.lower_priority()
 
     count = 0
+    backend = ct.capture_backend(config.source)
     log.info(
-        "commatrix collector started for host %s (db=%s, cpu<=%.0f%% of %d cores, disk<=%.0f%% free)",
-        host, config.database, config.cpu_budget_percent, governor.ncpu, config.disk_budget_percent,
+        "commatrix collector started for host %s (db=%s, capture=%s, cpu<=%.0f%% of %d cores, disk<=%.0f%% free)",
+        host, config.database, backend, config.cpu_budget_percent, governor.ncpu, config.disk_budget_percent,
     )
+    if backend == "sockets":
+        log.info(
+            "using /proc/net/{tcp,udp} fallback (no nf_conntrack procfs); "
+            "byte/packet counts will be zero"
+        )
     try:
         while iterations is None or count < iterations:
             start = time.time()

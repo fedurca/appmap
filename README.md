@@ -35,10 +35,12 @@ Reading `/proc/net/nf_conntrack` and `/proc/<pid>/fd` requires **root**.
 
 ## Requirements
 
-- Linux with the `nf_conntrack` module loaded.
+- Linux with the `nf_conntrack` module loaded (RHEL 8+, Ubuntu 20.04+ base images).
 - Python 3.9+ (standard library only — no pip dependencies).
-- Optional: `conntrack-tools` (for the event source), a Zabbix agent
-  (`zabbix_get`/`zabbix_sender`) for host parameters and transport.
+- No extra packages required: if `/proc/net/nf_conntrack` is absent, commatrix
+  falls back to `/proc/net/{tcp,udp}` automatically (topology still works; byte
+  counts are zero). Optional: `conntrack-tools` if already shipped by the distro,
+  or a Zabbix agent (`zabbix_get`/`zabbix_sender`) for host parameters.
 
 ## Install
 
@@ -95,15 +97,29 @@ hardened for production.
 
 ### Lab sudo helper (passwordless root for collection)
 
-On lab machines, install passwordless sudo for nf_conntrack setup and collection:
+For lab machines (RHEL 8+, Ubuntu 20.04+), install passwordless sudo once
+interactively, then run collection without prompts. No packages or network access
+are required by these scripts.
 
 ```bash
+cd /path/to/appmap
+
+# 1) One-time: installs /etc/sudoers.d/commatrix-lab (prompts for YOUR password once)
+chmod +x packaging/install-lab-sudoers.sh packaging/lab-commatrix-helper.sh
 ./packaging/install-lab-sudoers.sh
+
+# 2) Enable conntrack accounting / detect capture backend (no password after step 1)
 sudo ./packaging/lab-commatrix-helper.sh setup-conntrack
-sudo ./packaging/lab-commatrix-helper.sh collect --once --database /tmp/commatrix.db
+
+# 3) Collect (writes DB + HTML report automatically)
+sudo ./packaging/lab-commatrix-helper.sh collect-once --database /tmp/commatrix.db
+sudo ./packaging/lab-commatrix-helper.sh collect --database /tmp/commatrix.db --iterations 120
+
+# Remove passwordless sudo when done
+./packaging/install-lab-sudoers.sh --remove
 ```
 
-Remove with `./packaging/install-lab-sudoers.sh --remove`.
+After collection, open `/tmp/commatrix-report.html` for the dashboard with graphs.
 
 ## Usage
 

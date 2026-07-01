@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 
 from commatrix import conntrack as ct
 
@@ -52,10 +53,38 @@ class ConntrackParseTest(unittest.TestCase):
         self.assertIsNone(ct.parse_conntrack_line("   "))
 
     def test_resolve_source(self):
-        self.assertEqual(ct.resolve_source("auto"), "procfs")
         self.assertEqual(ct.resolve_source("procfs"), "procfs")
+        self.assertEqual(ct.resolve_source("sockets"), "sockets")
         with self.assertRaises(ValueError):
             ct.resolve_source("bogus")
+
+    def test_resolve_source_auto_prefers_procfs(self):
+        with mock.patch.object(ct, "proc_available", return_value=True):
+            self.assertEqual(ct.resolve_source("auto"), "procfs")
+
+    def test_resolve_source_auto_falls_back_to_sockets(self):
+        with mock.patch.object(ct, "proc_available", return_value=False), \
+             mock.patch.object(ct, "conntrack_tool_available", return_value=False):
+            self.assertEqual(ct.resolve_source("auto"), "sockets")
+
+    def test_entries_from_sockets(self):
+        from commatrix.sockets import SocketEntry
+
+        socks = [
+            SocketEntry(
+                proto="tcp", family=2, local_ip="10.0.0.5", local_port=44321,
+                remote_ip="10.0.0.10", remote_port=5432, state="ESTABLISHED",
+                inode=1, uid=0,
+            ),
+            SocketEntry(
+                proto="tcp", family=2, local_ip="0.0.0.0", local_port=22,
+                remote_ip="0.0.0.0", remote_port=0, state="LISTEN",
+                inode=2, uid=0,
+            ),
+        ]
+        entries = ct.entries_from_sockets(socks)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].orig_dport, 5432)
 
 
 if __name__ == "__main__":

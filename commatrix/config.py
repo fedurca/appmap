@@ -55,7 +55,7 @@ class Config:
     # [collector]
     poll_interval: float = 5.0
     database: str = "/var/lib/commatrix/commatrix.db"
-    source: str = "auto"  # auto | procfs | conntrack-events
+    source: str = "auto"  # auto | procfs | conntrack-events | sockets
     hostname: Optional[str] = None  # override; otherwise derived from zabbix/os
 
     # [network]
