@@ -69,6 +69,8 @@ class Config:
 
     # [export]
     snapshot_dir: str = "/var/lib/commatrix/snapshots"
+    html_report: bool = True  # write HTML dashboard when a collect session ends
+    html_report_path: Optional[str] = None  # default: <database>-report.html
 
     # [signatures]
     signatures_dir: Optional[str] = None  # None -> packaged defaults
@@ -147,6 +149,8 @@ def load_config(path: Optional[str] = None) -> Config:
     if parser.has_section("export"):
         sec = parser["export"]
         cfg.snapshot_dir = sec.get("snapshot_dir", cfg.snapshot_dir)
+        cfg.html_report = sec.getboolean("html_report", cfg.html_report)
+        cfg.html_report_path = sec.get("html_report_path", cfg.html_report_path)
 
     if parser.has_section("signatures"):
         sec = parser["signatures"]

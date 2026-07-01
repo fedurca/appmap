@@ -152,6 +152,8 @@ def cmd_report(args: argparse.Namespace) -> int:
             text = rp.service_sheets(store)
         elif fmt == "security":
             text = rp.security_markdown(store)
+        elif fmt == "html":
+            text = rp.report_html(store, args.host)
         else:  # pragma: no cover - argparse restricts choices
             raise ValueError(fmt)
     finally:
@@ -242,7 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--format",
         required=True,
-        choices=["csv", "json", "markdown", "mermaid", "dot", "catalog", "sheets", "security"],
+        choices=["csv", "json", "markdown", "mermaid", "dot", "catalog", "sheets", "security", "html"],
     )
     p_report.add_argument("-o", "--output", help="output file (default stdout)")
     p_report.set_defaults(func=cmd_report)

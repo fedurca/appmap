@@ -9,3 +9,4 @@ dist/
 *.db-shm
 .venv/
 venv/
+lab-run/

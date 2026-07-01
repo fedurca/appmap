@@ -93,6 +93,18 @@ This installs the distro `zabbix-agent`, points it at the given server, sets the
 hostname, and (optionally) installs the commatrix UserParameters. It is **not**
 hardened for production.
 
+### Lab sudo helper (passwordless root for collection)
+
+On lab machines, install passwordless sudo for nf_conntrack setup and collection:
+
+```bash
+./packaging/install-lab-sudoers.sh
+sudo ./packaging/lab-commatrix-helper.sh setup-conntrack
+sudo ./packaging/lab-commatrix-helper.sh collect --once --database /tmp/commatrix.db
+```
+
+Remove with `./packaging/install-lab-sudoers.sh --remove`.
+
 ## Usage
 
 ### 1. Collect on each VM (daemon)
@@ -130,6 +142,7 @@ commatrix push --server http://central:8899 --token SECRET
 
 ```bash
 commatrix report -f markdown  --database central.db   # communication matrix
+commatrix report -f html      --database central.db   # HTML dashboard + graphs
 commatrix report -f csv       --database central.db
 commatrix report -f mermaid   --database central.db   # topology diagram
 commatrix report -f dot       --database central.db | dot -Tpng -o topology.png

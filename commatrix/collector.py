@@ -173,16 +173,17 @@ class Collector:
 
     def poll_once(self, store: Store, host: str, now: Optional[float] = None) -> int:
         try:
-            entries = ct.read_proc_conntrack()
+            entries = ct.read_conntrack_snapshot(self.config.source)
         except PermissionError:
             log.error(
-                "cannot read %s: root privileges are required", ct.PROC_CONNTRACK
+                "cannot read conntrack data: root privileges are required"
             )
             raise
-        except FileNotFoundError:
-            log.error(
-                "%s not found; is the nf_conntrack module loaded?", ct.PROC_CONNTRACK
-            )
+        except FileNotFoundError as exc:
+            log.error("%s", exc)
+            raise
+        except RuntimeError as exc:
+            log.error("%s", exc)
             raise
         edges = self.build_edges(entries)
         return store.record_edges(host, edges, now=now)
@@ -268,7 +269,7 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
                 if paused:
                     # Still read (cheap) so timing/CPU accounting is realistic,
                     # but skip recording to protect the disk.
-                    ct.read_proc_conntrack()
+                    ct.read_conntrack_snapshot(config.source)
                     n = 0
                 else:
                     n = collector.poll_once(store, host, now=start)
@@ -292,4 +293,13 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     except KeyboardInterrupt:
         log.info("collector interrupted; shutting down")
     finally:
+        if config.html_report:
+            from . import report as rp
+
+            out_path = config.html_report_path or rp.default_html_report_path(config.database)
+            try:
+                rp.write_html_report(store, out_path)
+                log.info("HTML report written to %s", out_path)
+            except OSError as exc:
+                log.warning("failed to write HTML report to %s: %s", out_path, exc)
         store.close()

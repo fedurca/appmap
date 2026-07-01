@@ -232,6 +232,48 @@ def parse_conntrack_text(text: str) -> List[ConntrackEntry]:
     return entries
 
 
+def proc_available(path: str = PROC_CONNTRACK) -> bool:
+    return os.path.exists(path)
+
+
+def read_conntrack_list(binary: str = "conntrack") -> List[ConntrackEntry]:
+    """Snapshot currently tracked flows via ``conntrack -L`` (conntrack-tools)."""
+
+    if not conntrack_tool_available(binary):
+        raise FileNotFoundError(
+            "the 'conntrack' binary is not installed; install conntrack-tools "
+            "or enable CONFIG_NF_CONNTRACK_PROCFS"
+        )
+    proc = subprocess.run(
+        [binary, "-L", "-o", "extended"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"conntrack -L failed (exit {proc.returncode}): {proc.stderr.strip()}"
+        )
+    return parse_conntrack_text(proc.stdout)
+
+
+def read_conntrack_snapshot(source: str = "auto") -> List[ConntrackEntry]:
+    """Read the current conntrack table using the best available backend."""
+
+    effective = resolve_source(source)
+    if effective == "procfs":
+        if proc_available():
+            return read_proc_conntrack()
+        if conntrack_tool_available():
+            return read_conntrack_list()
+        raise FileNotFoundError(
+            f"{PROC_CONNTRACK} not found and conntrack-tools is not installed"
+        )
+    if effective == "conntrack-events":
+        return read_conntrack_list()
+    raise ValueError(f"unknown conntrack source: {effective!r}")
+
+
 def read_proc_conntrack(path: str = PROC_CONNTRACK) -> List[ConntrackEntry]:
     """Read and parse the current ``/proc/net/nf_conntrack`` snapshot.
 
@@ -251,11 +293,17 @@ def conntrack_tool_available(binary: str = "conntrack") -> bool:
 def resolve_source(preferred: str) -> str:
     """Resolve the effective capture source.
 
-    * ``auto`` -> ``procfs`` (portable, always available when running as root).
+    * ``auto`` -> ``procfs`` when ``/proc/net/nf_conntrack`` exists, otherwise
+      ``conntrack -L`` via conntrack-tools (needed when ``CONFIG_NF_CONNTRACK_PROCFS``
+      is disabled).
     * ``procfs`` / ``conntrack-events`` -> validated and returned as-is.
     """
 
     if preferred == "auto":
+        if proc_available():
+            return "procfs"
+        if conntrack_tool_available():
+            return "conntrack-events"
         return "procfs"
     if preferred in ("procfs", "conntrack-events"):
         return preferred

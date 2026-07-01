@@ -24,6 +24,9 @@ zabbix_sender = zabbix_sender
 
 [export]
 snapshot_dir = /var/lib/commatrix/snapshots
+# Write an HTML dashboard (with SVG graphs) when a collect session ends.
+html_report = true
+# html_report_path = /var/lib/commatrix/commatrix-report.html
 
 [resources]
 # Safety limits so the collector never hurts the host.

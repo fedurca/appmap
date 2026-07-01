@@ -114,6 +114,23 @@ class ReportTest(unittest.TestCase):
         text = rp.security_markdown(self.store)
         self.assertIn("External inbound exposure", text)
 
+    def test_report_html(self):
+        text = rp.report_html(self.store)
+        self.assertIn("<!DOCTYPE html>", text)
+        self.assertIn("Traffic graphs", text)
+        self.assertIn("<svg", text)
+        self.assertIn("Top services by bytes", text)
+        self.assertIn("nginx", text)
+        self.assertIn("flowchart LR", text)
+
+    def test_write_html_report(self):
+        out = os.path.join(self.tmp, "report.html")
+        rp.write_html_report(self.store, out)
+        with open(out, "r", encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("<!DOCTYPE html>", body)
+        self.assertGreater(os.path.getsize(out), 500)
+
 
 if __name__ == "__main__":
     unittest.main()
