@@ -1,0 +1,12 @@
+[Unit]
+Description=Commatrix snapshot export/push to central collector
+Documentation=https://example.com/commatrix
+After=commatrix-collector.service
+
+[Service]
+Type=oneshot
+User=root
+# Either write a snapshot to disk (for ssh/rsync pull) ...
+ExecStart=/usr/bin/commatrix export --config /etc/commatrix/commatrix.conf -o /var/lib/commatrix/snapshots/%H.json
+# ... or push directly to a central collector (uncomment and set the URL):
+# ExecStart=/usr/bin/commatrix push --config /etc/commatrix/commatrix.conf --server http://central.example.com:8899 --token CHANGEME

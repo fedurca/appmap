@@ -1,0 +1,20 @@
+[Unit]
+Description=Commatrix central collector server (HTTP snapshot ingest)
+Documentation=https://example.com/commatrix
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The central server does not need root; run as a dedicated user in production.
+User=commatrix
+ExecStart=/usr/bin/commatrix serve --database /var/lib/commatrix/central.db --host 0.0.0.0 --port 8899
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=commatrix
+
+[Install]
+WantedBy=multi-user.target

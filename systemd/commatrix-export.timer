@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically export/push commatrix snapshots
+Documentation=https://example.com/commatrix
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,4 @@
+ipv4     2 tcp      6 431999 ESTABLISHED src=10.0.0.5 dst=10.0.0.10 sport=44321 dport=5432 packets=10 bytes=1500 src=10.0.0.10 dst=10.0.0.5 sport=5432 dport=44321 packets=8 bytes=2400 [ASSURED] mark=0 use=1 delta-time=42
+ipv4     2 tcp      6 300 ESTABLISHED src=203.0.113.9 dst=10.0.0.10 sport=51000 dport=443 packets=5 bytes=600 src=10.0.0.10 dst=203.0.113.9 sport=443 dport=51000 packets=4 bytes=8000 [ASSURED] mark=0 use=1 delta-time=10
+ipv4     2 udp      17 29 src=10.0.0.10 dst=8.8.8.8 sport=33333 dport=53 packets=1 bytes=60 src=8.8.8.8 dst=10.0.0.10 sport=53 dport=33333 packets=1 bytes=120 mark=0 use=1
+ipv4     2 tcp      6 120 TIME_WAIT src=127.0.0.1 dst=127.0.0.1 sport=55555 dport=6379 packets=3 bytes=300 src=127.0.0.1 dst=127.0.0.1 sport=6379 dport=55555 packets=2 bytes=400 [ASSURED] mark=0 use=1

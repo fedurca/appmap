@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "commatrix"
+version = "0.1.0"
+description = "Stdlib-only network communication matrix and application catalog for Linux/Zabbix hosts"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Commatrix contributors" }]
+keywords = ["nf_conntrack", "network", "zabbix", "communication-matrix", "application-catalog"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking :: Monitoring",
+]
+# Intentionally no runtime dependencies: standard library only.
+dependencies = []
+
+[project.scripts]
+commatrix = "commatrix.__main__:main"
+
+[project.urls]
+Homepage = "https://example.com/commatrix"
+
+[tool.setuptools]
+packages = ["commatrix"]
+
+[tool.setuptools.package-data]
+commatrix = ["signatures/*.json"]

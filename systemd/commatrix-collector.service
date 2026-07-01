@@ -1,0 +1,24 @@
+[Unit]
+Description=Commatrix network flow collector (nf_conntrack)
+Documentation=https://example.com/commatrix
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Must run as root to read /proc/net/nf_conntrack and /proc/<pid>/fd.
+User=root
+ExecStartPre=/sbin/sysctl -w net.netfilter.nf_conntrack_acct=1
+ExecStartPre=/sbin/sysctl -w net.netfilter.nf_conntrack_timestamp=1
+ExecStart=/usr/bin/commatrix collect --config /etc/commatrix/commatrix.conf
+Restart=on-failure
+RestartSec=5
+# Light hardening (the process still needs broad read access to /proc).
+NoNewPrivileges=true
+ProtectHome=true
+ProtectControlGroups=true
+RuntimeDirectory=commatrix
+StateDirectory=commatrix
+
+[Install]
+WantedBy=multi-user.target

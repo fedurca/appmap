@@ -1,0 +1,235 @@
+"""Collection orchestration: tie conntrack, sockets, processes and catalog
+signatures together, then persist aggregated edges to the store.
+"""
+
+from __future__ import annotations
+
+import logging
+import socket as _socket
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set, Tuple
+
+from . import conntrack as ct
+from .catalog import Signatures, identify_service, load_signatures
+from .config import Config
+from .flows import NetworkClassifier, NormalizedFlow, local_ips_from_sockets, normalize_entries
+from .processes import ProcessInfo, collect_processes
+from .sockets import SocketEntry, build_inode_to_pid, listening_port_map, read_all_sockets
+from .store import EdgeObservation, Store
+from .zabbix import collect_host_params
+
+log = logging.getLogger("commatrix.collector")
+
+# key -> aggregated snapshot values while building one poll's result.
+_AggKey = Tuple[str, str, str, str, int]
+
+
+@dataclass
+class _Agg:
+    flow: NormalizedFlow
+    snapshot_bytes: int = 0
+    snapshot_packets: int = 0
+    pid: Optional[int] = None
+
+
+class Collector:
+    def __init__(self, config: Config):
+        self.config = config
+        self.classifier = NetworkClassifier(config.internal_cidrs)
+        self.signatures: Signatures = load_signatures(config.signatures_dir)
+        self._dns_cache: Dict[str, Optional[str]] = {}
+        self._accounting_warned = False
+
+    # -- socket / process context --------------------------------------
+    def _socket_indexes(
+        self, sockets: List[SocketEntry]
+    ) -> Tuple[Dict[Tuple[str, str, int, str, int], int], Dict[Tuple[str, int], int]]:
+        inode_to_pid = build_inode_to_pid()
+        established: Dict[Tuple[str, str, int, str, int], int] = {}
+        listening: Dict[Tuple[str, int], int] = {}
+        for s in sockets:
+            pid = inode_to_pid.get(s.inode)
+            if pid is None:
+                continue
+            if s.is_listening:
+                listening.setdefault((s.proto, s.local_port), pid)
+            else:
+                established[
+                    (s.proto, s.local_ip, s.local_port, s.remote_ip, s.remote_port)
+                ] = pid
+        return established, listening
+
+    def _resolve_pid(
+        self,
+        flow: NormalizedFlow,
+        established: Dict[Tuple[str, str, int, str, int], int],
+        listening: Dict[Tuple[str, int], int],
+    ) -> Optional[int]:
+        if flow.direction in ("inbound", "loopback"):
+            key = (flow.proto, flow.local_ip, flow.service_port, flow.peer_ip, flow.peer_port)
+            pid = established.get(key)
+            if pid is not None:
+                return pid
+            return listening.get((flow.proto, flow.service_port))
+        if flow.direction == "outbound":
+            key = (flow.proto, flow.local_ip, flow.local_port, flow.peer_ip, flow.peer_port)
+            return established.get(key)
+        return None
+
+    def _reverse_dns(self, ip: str) -> Optional[str]:
+        if ip in self._dns_cache:
+            return self._dns_cache[ip]
+        name: Optional[str] = None
+        old_timeout = _socket.getdefaulttimeout()
+        try:
+            _socket.setdefaulttimeout(1.0)
+            name = _socket.gethostbyaddr(ip)[0]
+        except (OSError, IndexError):
+            name = None
+        finally:
+            _socket.setdefaulttimeout(old_timeout)
+        self._dns_cache[ip] = name
+        return name
+
+    # -- one poll ------------------------------------------------------
+    def build_edges(self, entries: List[ct.ConntrackEntry]) -> List[EdgeObservation]:
+        sockets = read_all_sockets()
+        local_ips = local_ips_from_sockets(sockets)
+        listening_ports = set(listening_port_map(sockets).keys())
+        established_idx, listening_idx = self._socket_indexes(sockets)
+
+        flows = normalize_entries(entries, local_ips, listening_ports, self.classifier)
+
+        # Aggregate over ephemeral ports; attach owning pid per (pre-agg) flow.
+        aggregated: Dict[_AggKey, _Agg] = {}
+        pids_needed: Set[int] = set()
+        for flow in flows:
+            pid = self._resolve_pid(flow, established_idx, listening_idx)
+            if pid is not None:
+                pids_needed.add(pid)
+            key = flow.key()
+            agg = aggregated.get(key)
+            if agg is None:
+                aggregated[key] = _Agg(
+                    flow=flow,
+                    snapshot_bytes=flow.bytes,
+                    snapshot_packets=flow.packets,
+                    pid=pid,
+                )
+            else:
+                agg.snapshot_bytes += flow.bytes
+                agg.snapshot_packets += flow.packets
+                if agg.pid is None and pid is not None:
+                    agg.pid = pid
+
+        processes = collect_processes(list(pids_needed))
+        accounting = ct.accounting_enabled()
+        if not accounting and not self._accounting_warned:
+            log.warning(
+                "nf_conntrack accounting is disabled; byte/packet counts will be "
+                "zero. Enable with: sysctl -w net.netfilter.nf_conntrack_acct=1"
+            )
+            self._accounting_warned = True
+
+        edges: List[EdgeObservation] = []
+        for key, agg in aggregated.items():
+            flow = agg.flow
+            proc: Optional[ProcessInfo] = processes.get(agg.pid) if agg.pid else None
+            identity = identify_service(flow.service_port, self.signatures, proc)
+
+            peer_name = None
+            if self.config.resolve_external and flow.peer_class == "external":
+                peer_name = self._reverse_dns(flow.peer_ip)
+
+            data_quality = None
+            if not accounting or (agg.snapshot_bytes == 0 and agg.snapshot_packets == 0):
+                data_quality = "no-accounting"
+
+            edges.append(
+                EdgeObservation(
+                    proto=flow.proto,
+                    direction=flow.direction,
+                    local_ip=flow.local_ip,
+                    peer_ip=flow.peer_ip,
+                    service_port=flow.service_port,
+                    peer_class=flow.peer_class,
+                    snapshot_bytes=agg.snapshot_bytes,
+                    snapshot_packets=agg.snapshot_packets,
+                    service_side=flow.service_side,
+                    peer_name=peer_name,
+                    service_name=identity.service_name,
+                    process_comm=proc.comm if proc else None,
+                    process_exe=proc.exe if proc else None,
+                    unit=proc.unit if proc else None,
+                    package=proc.package if proc else None,
+                    container_id=proc.container_id if proc else None,
+                    l7_protocol=identity.l7_protocol,
+                    data_quality=data_quality,
+                )
+            )
+        return edges
+
+    def poll_once(self, store: Store, host: str, now: Optional[float] = None) -> int:
+        try:
+            entries = ct.read_proc_conntrack()
+        except PermissionError:
+            log.error(
+                "cannot read %s: root privileges are required", ct.PROC_CONNTRACK
+            )
+            raise
+        except FileNotFoundError:
+            log.error(
+                "%s not found; is the nf_conntrack module loaded?", ct.PROC_CONNTRACK
+            )
+            raise
+        edges = self.build_edges(entries)
+        return store.record_edges(host, edges, now=now)
+
+    def refresh_host_params(self, store: Store, host: str) -> None:
+        params = collect_host_params(
+            self.config.agent_conf,
+            zabbix_get_bin=self.config.zabbix_get,
+            hostname_override=self.config.hostname,
+        )
+        store.upsert_host(host, params)
+
+
+def resolve_host(config: Config) -> str:
+    from .zabbix import parse_agent_config, resolve_hostname
+
+    agent_cfg = parse_agent_config(config.agent_conf)
+    return resolve_hostname(agent_cfg, config.hostname)
+
+
+def run_loop(config: Config, iterations: Optional[int] = None) -> None:
+    """Run the collection loop.  ``iterations=None`` runs forever."""
+
+    collector = Collector(config)
+    host = resolve_host(config)
+    store = Store(config.database)
+    collector.refresh_host_params(store, host)
+
+    count = 0
+    log.info("commatrix collector started for host %s (db=%s)", host, config.database)
+    try:
+        while iterations is None or count < iterations:
+            start = time.time()
+            try:
+                n = collector.poll_once(store, host, now=start)
+                log.debug("poll %d recorded %d edges", count, n)
+            except (PermissionError, FileNotFoundError):
+                break
+            # Refresh host params occasionally (every ~60 polls).
+            if count % 60 == 0 and count > 0:
+                collector.refresh_host_params(store, host)
+            count += 1
+            if iterations is not None and count >= iterations:
+                break
+            elapsed = time.time() - start
+            sleep_for = max(0.0, config.poll_interval - elapsed)
+            time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        log.info("collector interrupted; shutting down")
+    finally:
+        store.close()
