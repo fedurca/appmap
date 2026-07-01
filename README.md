@@ -42,18 +42,56 @@ Reading `/proc/net/nf_conntrack` and `/proc/<pid>/fd` requires **root**.
 
 ## Install
 
-```bash
-pip install .        # or: python3 -m pip install .
-# provides the `commatrix` console command; you can also run `python3 -m commatrix`
-```
-
-Copy the example config and packaging assets:
+### Recommended: the installer (systemd + resource limits)
 
 ```bash
-install -Dm644 packaging/commatrix.conf.example /etc/commatrix/commatrix.conf
-install -Dm644 systemd/commatrix-collector.service /etc/systemd/system/commatrix-collector.service
-systemctl enable --now commatrix-collector.service
+sudo ./install.sh                 # system-wide; installs & starts the systemd service
+sudo ./install.sh --no-start      # install without starting
+./install.sh --user               # per-user install (labs/testing; capture still needs root)
+sudo ./install.sh --uninstall     # remove (keeps config/data)
 ```
+
+The installer copies the package, writes `/etc/commatrix/commatrix.conf`, enables
+the required conntrack sysctls, installs the systemd unit **with a CPU quota of
+10% of total compute** (`10% x nproc`) and a memory ceiling, installs the Zabbix
+`UserParameter` file if an agent is present, and enables the service. Override
+budgets with `--cpu-percent N` / `--disk-percent N`.
+
+### Manual / pip
+
+```bash
+pip install .        # provides the `commatrix` command; also runnable as `python3 -m commatrix`
+```
+
+## Resource safety (never hurt the host)
+
+Commatrix is designed to be invisible to real workloads:
+
+- **CPU:** an in-process governor measures how much CPU each poll consumed and
+  sleeps so the collector never averages more than **10% of total compute**
+  (all cores). It also backs off further under high load average. The systemd
+  unit additionally enforces `CPUQuota`, `Nice=19`, `CPUSchedulingPolicy=idle`
+  and `IOSchedulingClass=idle` as a hard ceiling.
+- **Disk:** the database never exceeds **10% of free disk space** (least-recently
+  active edges are pruned, plus a `retention_days` window). Writes pause entirely
+  if free space falls below a hard floor (default 5%).
+- **Memory:** advisory `memory_max_mb` in the config, enforced by the unit's
+  `MemoryMax`.
+
+All limits are configurable in the `[resources]` section of the config.
+
+## Test Zabbix agent installer (lab only)
+
+To spin up a Zabbix agent for exercising the integration on a lab machine:
+
+```bash
+sudo ./packaging/install-zabbix-agent-test.sh \
+    --hostname lab-pc --server 127.0.0.1 --with-commatrix-userparams
+```
+
+This installs the distro `zabbix-agent`, points it at the given server, sets the
+hostname, and (optionally) installs the commatrix UserParameters. It is **not**
+hardened for production.
 
 ## Usage
 

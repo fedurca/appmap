@@ -13,10 +13,28 @@ ExecStartPre=/sbin/sysctl -w net.netfilter.nf_conntrack_timestamp=1
 ExecStart=/usr/bin/commatrix collect --config /etc/commatrix/commatrix.conf
 Restart=on-failure
 RestartSec=5
-# Light hardening (the process still needs broad read access to /proc).
+
+# --- Resource safety: never hurt the host --------------------------------
+# Lowest scheduling priority so real workloads always win.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+# Hard CPU ceiling. This defaults to 10% of ONE core; the installer replaces
+# it via a drop-in with 10% of TOTAL compute (10% * nproc). The in-process
+# governor also self-throttles to 10% of total compute.
+CPUQuota=10%
+# Memory ceiling (advisory; matches memory_max_mb in the config).
+MemoryMax=128M
+MemoryHigh=96M
+TasksMax=64
+
+# --- Light sandboxing (process still needs broad read access to /proc) ----
 NoNewPrivileges=true
 ProtectHome=true
 ProtectControlGroups=true
+ProtectKernelTunables=false
 RuntimeDirectory=commatrix
 StateDirectory=commatrix
 

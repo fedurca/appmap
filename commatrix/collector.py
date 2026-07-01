@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from . import conntrack as ct
+from . import resources as rsrc
 from .catalog import Signatures, identify_service, load_signatures
 from .config import Config
 from .flows import NetworkClassifier, NormalizedFlow, local_ips_from_sockets, normalize_entries
@@ -202,32 +203,91 @@ def resolve_host(config: Config) -> str:
     return resolve_hostname(agent_cfg, config.hostname)
 
 
+def _enforce_disk(config: Config, store: Store, governor: rsrc.ResourceGovernor) -> bool:
+    """Apply retention + disk budget. Returns True if writes should be paused."""
+
+    if config.retention_days > 0:
+        cutoff = time.time() - config.retention_days * 86400
+        removed = store.prune_older_than(cutoff)
+        if removed:
+            log.info("retention: pruned %d edges older than %.0f days", removed, config.retention_days)
+
+    status = governor.disk_status(config.database, store.db_size_bytes())
+    if status.over_budget:
+        removed = store.prune_to_budget(status.budget_bytes)
+        log.warning(
+            "disk budget exceeded (db=%d B > budget=%d B); pruned %d edges",
+            status.db_bytes, status.budget_bytes, removed,
+        )
+        status = governor.disk_status(config.database, store.db_size_bytes())
+
+    if governor.should_pause_writes(status):
+        log.warning(
+            "free disk %.1f%% below floor %.1f%%; pausing writes this cycle",
+            status.free_fraction * 100, config.min_free_disk * 100,
+        )
+        return True
+    return False
+
+
 def run_loop(config: Config, iterations: Optional[int] = None) -> None:
-    """Run the collection loop.  ``iterations=None`` runs forever."""
+    """Run the collection loop.  ``iterations=None`` runs forever.
+
+    The loop is governed by :class:`resources.ResourceGovernor` so it never
+    averages more than ``cpu_budget`` of total compute and never lets the
+    database exceed ``disk_budget`` of free space.
+    """
 
     collector = Collector(config)
     host = resolve_host(config)
     store = Store(config.database)
     collector.refresh_host_params(store, host)
 
+    governor = rsrc.ResourceGovernor(
+        cpu_budget=config.cpu_budget,
+        disk_budget=config.disk_budget,
+        min_free_disk=config.min_free_disk,
+        min_interval=max(1.0, config.poll_interval),
+    )
+    rsrc.lower_priority()
+
     count = 0
-    log.info("commatrix collector started for host %s (db=%s)", host, config.database)
+    log.info(
+        "commatrix collector started for host %s (db=%s, cpu<=%.0f%% of %d cores, disk<=%.0f%% free)",
+        host, config.database, config.cpu_budget_percent, governor.ncpu, config.disk_budget_percent,
+    )
     try:
         while iterations is None or count < iterations:
             start = time.time()
+            cpu_before = rsrc.process_cpu_seconds()
+
+            # Enforce disk limits before writing anything.
+            paused = _enforce_disk(config, store, governor)
+
             try:
-                n = collector.poll_once(store, host, now=start)
+                if paused:
+                    # Still read (cheap) so timing/CPU accounting is realistic,
+                    # but skip recording to protect the disk.
+                    ct.read_proc_conntrack()
+                    n = 0
+                else:
+                    n = collector.poll_once(store, host, now=start)
                 log.debug("poll %d recorded %d edges", count, n)
             except (PermissionError, FileNotFoundError):
                 break
-            # Refresh host params occasionally (every ~60 polls).
+
             if count % 60 == 0 and count > 0:
                 collector.refresh_host_params(store, host)
             count += 1
             if iterations is not None and count >= iterations:
                 break
+
             elapsed = time.time() - start
-            sleep_for = max(0.0, config.poll_interval - elapsed)
+            cpu_used = rsrc.process_cpu_seconds() - cpu_before
+            sleep_for = governor.throttle_sleep(cpu_used, elapsed, config.poll_interval)
+            log.debug(
+                "poll took %.3fs (cpu %.3fs); sleeping %.2fs", elapsed, cpu_used, sleep_for
+            )
             time.sleep(sleep_for)
     except KeyboardInterrupt:
         log.info("collector interrupted; shutting down")

@@ -343,6 +343,70 @@ class Store:
         return count
 
 
+    # -- maintenance / retention ----------------------------------------
+    def db_size_bytes(self) -> int:
+        """Approximate on-disk size including WAL/SHM sidecar files."""
+
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += os.path.getsize(self.path + suffix)
+            except OSError:
+                pass
+        return total
+
+    def flow_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) AS c FROM flows").fetchone()
+        return int(row["c"]) if row else 0
+
+    def prune_older_than(self, cutoff_ts: float) -> int:
+        """Delete edges whose ``last_seen`` is older than *cutoff_ts*."""
+
+        cur = self.conn.execute("DELETE FROM flows WHERE last_seen < ?", (cutoff_ts,))
+        self.conn.commit()
+        return cur.rowcount
+
+    def _checkpoint_and_vacuum(self) -> None:
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            self.conn.execute("VACUUM;")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def prune_to_budget(self, max_bytes: int, batch_fraction: float = 0.1) -> int:
+        """Delete the least-recently-active edges until the DB fits *max_bytes*.
+
+        Returns the number of rows deleted.  Runs a bounded number of passes to
+        avoid spinning; each pass drops roughly ``batch_fraction`` of rows and
+        VACUUMs to reclaim space.
+        """
+
+        deleted = 0
+        self._checkpoint_and_vacuum()
+        for _ in range(20):
+            if self.db_size_bytes() <= max_bytes:
+                break
+            total = self.flow_count()
+            if total == 0:
+                break
+            batch = max(1, int(total * batch_fraction))
+            cur = self.conn.execute(
+                """
+                DELETE FROM flows WHERE id IN (
+                    SELECT id FROM flows
+                    ORDER BY COALESCE(last_active, last_seen) ASC
+                    LIMIT ?
+                )
+                """,
+                (batch,),
+            )
+            deleted += cur.rowcount
+            self.conn.commit()
+            self._checkpoint_and_vacuum()
+        return deleted
+
+
 def _flow_row_defaults(f: Dict[str, object]) -> Dict[str, object]:
     keys = [
         "host", "proto", "direction", "local_ip", "peer_ip", "service_port",

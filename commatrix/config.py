@@ -73,9 +73,28 @@ class Config:
     # [signatures]
     signatures_dir: Optional[str] = None  # None -> packaged defaults
 
+    # [resources]
+    cpu_budget_percent: float = 10.0  # max % of TOTAL compute (all cores)
+    disk_budget_percent: float = 10.0  # max % of free disk the DB may use
+    min_free_disk_percent: float = 5.0  # pause writes below this free %
+    retention_days: float = 30.0  # drop edges not seen within this window
+    memory_max_mb: int = 128  # advisory; enforced by systemd MemoryMax
+
     @property
     def internal_cidr_list(self) -> List[str]:
         return self.internal_cidrs
+
+    @property
+    def cpu_budget(self) -> float:
+        return self.cpu_budget_percent / 100.0
+
+    @property
+    def disk_budget(self) -> float:
+        return self.disk_budget_percent / 100.0
+
+    @property
+    def min_free_disk(self) -> float:
+        return self.min_free_disk_percent / 100.0
 
 
 def _split_list(value: str) -> List[str]:
@@ -132,5 +151,13 @@ def load_config(path: Optional[str] = None) -> Config:
     if parser.has_section("signatures"):
         sec = parser["signatures"]
         cfg.signatures_dir = sec.get("dir", cfg.signatures_dir)
+
+    if parser.has_section("resources"):
+        sec = parser["resources"]
+        cfg.cpu_budget_percent = sec.getfloat("cpu_budget_percent", cfg.cpu_budget_percent)
+        cfg.disk_budget_percent = sec.getfloat("disk_budget_percent", cfg.disk_budget_percent)
+        cfg.min_free_disk_percent = sec.getfloat("min_free_disk_percent", cfg.min_free_disk_percent)
+        cfg.retention_days = sec.getfloat("retention_days", cfg.retention_days)
+        cfg.memory_max_mb = sec.getint("memory_max_mb", cfg.memory_max_mb)
 
     return cfg
