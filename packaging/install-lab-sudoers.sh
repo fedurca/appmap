@@ -74,7 +74,9 @@ if sudo visudo -c -f "$SUDOERS_FILE"; then
     echo "  sudo ${HELPER} collect-once --database /tmp/commatrix.db"
     echo "  sudo ${HELPER} collect --database /tmp/commatrix.db --iterations 120"
     echo
+    APPMAP_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
     echo "HTML report is written automatically to /tmp/commatrix-report.html"
+    echo "Environment log: ${APPMAP_ROOT}/commatrix-lab-env.log"
 else
     echo "ERROR: visudo rejected ${SUDOERS_FILE} — removing." >&2
     sudo rm -f "$SUDOERS_FILE"

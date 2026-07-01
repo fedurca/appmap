@@ -111,9 +111,11 @@ chmod +x packaging/install-lab-sudoers.sh packaging/lab-commatrix-helper.sh
 # 2) Enable conntrack accounting / detect capture backend (no password after step 1)
 sudo ./packaging/lab-commatrix-helper.sh setup-conntrack
 
-# 3) Collect (writes DB + HTML report automatically)
+# 3) Collect (writes DB + HTML report; sysctls restored automatically after run)
 sudo ./packaging/lab-commatrix-helper.sh collect-once --database /tmp/commatrix.db
 sudo ./packaging/lab-commatrix-helper.sh collect --database /tmp/commatrix.db --iterations 120
+
+# Environment changes (sysctls) are logged to ./commatrix-lab-env.log in the repo root.
 
 # Remove passwordless sudo when done
 ./packaging/install-lab-sudoers.sh --remove

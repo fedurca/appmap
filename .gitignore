@@ -10,3 +10,5 @@ dist/
 .venv/
 venv/
 lab-run/
+commatrix-lab-env.log
+.commatrix-lab-env.state
