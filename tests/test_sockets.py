@@ -1,5 +1,6 @@
 import os
 import socket
+import tempfile
 import unittest
 
 from commatrix import sockets as sk
@@ -41,6 +42,32 @@ class SocketParseTest(unittest.TestCase):
         # ::1 encoded as four little-endian words.
         hex_addr = "00000000000000000000000001000000"
         self.assertEqual(sk._parse_ipv6(hex_addr), "::1")
+
+
+class ReadAllSocketsTest(unittest.TestCase):
+    """Guard against the socket-fallback capture path reading zero sockets.
+
+    Regression test: ``read_all_sockets`` used to join an absolute path onto
+    ``proc_root`` (``/proc`` + ``/proc/net/tcp`` -> ``/proc/proc/net/tcp``),
+    which does not exist, so it silently returned no sockets on every host that
+    relies on the ``/proc/net/{tcp,udp}`` fallback.
+    """
+
+    def _write_proc_root(self, root):
+        net_dir = os.path.join(root, "net")
+        os.makedirs(net_dir)
+        with open(os.path.join(FIXTURES, "proc_net_tcp.sample"), encoding="ascii") as fh:
+            sample = fh.read()
+        for name in ("tcp", "tcp6", "udp", "udp6"):
+            with open(os.path.join(net_dir, name), "w", encoding="ascii") as fh:
+                fh.write(sample if name == "tcp" else "  sl  local_address\n")
+
+    def test_reads_from_proc_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write_proc_root(root)
+            entries = sk.read_all_sockets(proc_root=root)
+        self.assertTrue(entries, "read_all_sockets returned no sockets")
+        self.assertTrue(any(e.local_port == 5432 for e in entries))
 
 
 if __name__ == "__main__":

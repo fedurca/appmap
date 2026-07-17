@@ -27,11 +27,13 @@ TCP_STATES = {
     "0B": "CLOSING",
 }
 
+# Paths are relative to ``proc_root`` (default ``/proc``) so callers can point
+# at an alternate mount without producing a doubled prefix.
 _PROC_NET_FILES = {
-    "tcp": ("/proc/net/tcp", _socket.AF_INET),
-    "tcp6": ("/proc/net/tcp6", _socket.AF_INET6),
-    "udp": ("/proc/net/udp", _socket.AF_INET),
-    "udp6": ("/proc/net/udp6", _socket.AF_INET6),
+    "tcp": ("net/tcp", _socket.AF_INET),
+    "tcp6": ("net/tcp6", _socket.AF_INET6),
+    "udp": ("net/udp", _socket.AF_INET),
+    "udp6": ("net/udp6", _socket.AF_INET6),
 }
 
 
@@ -115,7 +117,10 @@ def read_all_sockets(proc_root: str = "/proc") -> List[SocketEntry]:
     entries: List[SocketEntry] = []
     for key, (rel, family) in _PROC_NET_FILES.items():
         proto = "tcp" if key.startswith("tcp") else "udp"
-        path = os.path.join(proc_root, rel.lstrip("/"))
+        # ``_PROC_NET_FILES`` stores paths relative to ``/proc`` (e.g. "net/tcp");
+        # join them onto *proc_root* so a custom root is honoured and we never
+        # produce a doubled prefix like ``/proc/proc/net/tcp``.
+        path = os.path.join(proc_root, rel)
         try:
             with open(path, "r", encoding="ascii", errors="replace") as fh:
                 text = fh.read()
