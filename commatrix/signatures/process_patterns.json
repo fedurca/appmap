@@ -31,7 +31,7 @@
     {"pattern": "node_exporter", "application": "node-exporter", "l7": "http"},
     {"pattern": "grafana", "application": "grafana", "l7": "http"},
     {"pattern": "gunicorn|uwsgi", "application": "python-wsgi-app", "l7": "http"},
-    {"pattern": "node\\b|npm|nodejs", "application": "nodejs-app", "l7": "http"},
+    {"pattern": "(?:^|/)node(?:js)?[0-9.]*(?=$|\\s)|(?:^|/|\\s)np[mx](?=$|\\s)", "application": "nodejs-app", "l7": "http"},
     {"pattern": "php-fpm", "application": "php-fpm", "l7": "fastcgi"}
   ]
 }

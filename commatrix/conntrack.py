@@ -101,10 +101,77 @@ def timestamp_enabled() -> bool:
 
 
 def _read_sysctl_flag(path: str) -> bool:
+    return read_sysctl_flag(path) is True
+
+
+def read_sysctl_flag(path: str) -> Optional[bool]:
+    """Return the boolean value of a 0/1 sysctl file.
+
+    Returns ``None`` when the file cannot be read (missing sysctl, no
+    permission, or ``nf_conntrack`` not loaded), which lets callers tell
+    "disabled" apart from "unavailable".
+    """
+
     try:
         with open(path, "r", encoding="ascii") as fh:
             return fh.read().strip() == "1"
     except OSError:
+        return None
+
+
+def write_sysctl_flag(path: str, enabled: bool) -> bool:
+    """Write ``1``/``0`` to a sysctl file. Returns True on success.
+
+    Writing usually requires root; failures (permission, missing file) are
+    reported via the return value rather than raising.
+    """
+
+    try:
+        with open(path, "w", encoding="ascii") as fh:
+            fh.write("1\n" if enabled else "0\n")
+        return True
+    except OSError:
+        return False
+
+
+class AccountingGuard:
+    """Enable nf_conntrack byte/packet accounting for the lifetime of a run.
+
+    On entry the current ``nf_conntrack_acct`` state is read and, if disabled,
+    accounting is turned on.  On exit the original state is restored (so a host
+    that had accounting off is left exactly as it was found).  When the sysctl
+    is unavailable or not writable (e.g. not root, or ``nf_conntrack`` absent),
+    the guard degrades to a no-op and records that fact for the caller to log.
+    """
+
+    def __init__(self, sysctl: str = _ACCT_SYSCTL):
+        self.sysctl = sysctl
+        self.original: Optional[bool] = None
+        self.changed = False
+        self.enable_failed = False
+
+    @property
+    def available(self) -> bool:
+        return self.original is not None
+
+    def __enter__(self) -> "AccountingGuard":
+        self.original = read_sysctl_flag(self.sysctl)
+        if self.original is False:
+            if write_sysctl_flag(self.sysctl, True):
+                self.changed = True
+            else:
+                self.enable_failed = True
+        return self
+
+    def restore(self) -> None:
+        """Restore the sysctl to the value observed on entry (idempotent)."""
+
+        if self.changed and self.original is not None:
+            if write_sysctl_flag(self.sysctl, self.original):
+                self.changed = False
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.restore()
         return False
 
 

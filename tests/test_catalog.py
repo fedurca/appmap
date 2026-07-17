@@ -36,6 +36,35 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(ident.service_name, "port-59999")
         self.assertEqual(ident.source, "fallback")
 
+    def test_nodejs_pattern_matches_real_node(self):
+        for cmd in ("/usr/bin/node server.js", "node", "npm run build", "/usr/local/bin/nodejs20 app"):
+            proc = ProcessInfo(pid=1, comm="node", cmdline=cmd)
+            ident = identify_service(3000, self.sig, proc)
+            self.assertEqual(ident.service_name, "nodejs-app", cmd)
+
+    def test_browser_not_misidentified_as_nodejs(self):
+        # Regression: "--render-node-override" and substrings like "npmjs" used
+        # to match the nodejs pattern, mislabelling browsers as nodejs-app.
+        chrome = ProcessInfo(
+            pid=1,
+            comm="chrome",
+            cmdline="/opt/chrome --type=gpu-process --render-node-override=/dev/dri/renderD128",
+            exe="/opt/chrome",
+        )
+        ident = identify_service(443, self.sig, chrome)
+        self.assertEqual(ident.service_name, "chrome")
+        self.assertEqual(ident.l7_protocol, "https")
+
+        cursor = ProcessInfo(
+            pid=2,
+            comm="cursor",
+            cmdline='/usr/share/cursor/cursor --allow=["npmjs.com"] --render-node-override=/dev/dri/renderD128',
+            exe="/usr/share/cursor/cursor",
+        )
+        ident = identify_service(443, self.sig, cursor)
+        self.assertEqual(ident.service_name, "cursor")
+        self.assertEqual(ident.l7_protocol, "https")
+
     def test_cleartext_flag(self):
         ident = identify_service(80, self.sig, None)
         self.assertTrue(ident.cleartext)

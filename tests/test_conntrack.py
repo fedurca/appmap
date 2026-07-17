@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -85,6 +86,68 @@ class ConntrackParseTest(unittest.TestCase):
         entries = ct.entries_from_sockets(socks)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].orig_dport, 5432)
+
+
+class SysctlFlagTest(unittest.TestCase):
+    def _tmp_flag(self, value):
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write(value)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_read_sysctl_flag_values(self):
+        self.assertIs(ct.read_sysctl_flag(self._tmp_flag("1\n")), True)
+        self.assertIs(ct.read_sysctl_flag(self._tmp_flag("0\n")), False)
+
+    def test_read_sysctl_flag_missing_returns_none(self):
+        self.assertIsNone(ct.read_sysctl_flag("/nonexistent/sysctl/flag"))
+
+    def test_write_sysctl_flag_roundtrip(self):
+        path = self._tmp_flag("0\n")
+        self.assertTrue(ct.write_sysctl_flag(path, True))
+        self.assertIs(ct.read_sysctl_flag(path), True)
+        self.assertTrue(ct.write_sysctl_flag(path, False))
+        self.assertIs(ct.read_sysctl_flag(path), False)
+
+    def test_write_sysctl_flag_failure_returns_false(self):
+        self.assertFalse(ct.write_sysctl_flag("/proc/does/not/exist", True))
+
+
+class AccountingGuardTest(unittest.TestCase):
+    def _tmp_flag(self, value):
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write(value)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_enables_then_restores_when_originally_off(self):
+        path = self._tmp_flag("0\n")
+        guard = ct.AccountingGuard(sysctl=path)
+        with guard:
+            self.assertTrue(guard.available)
+            self.assertTrue(guard.changed)
+            self.assertIs(ct.read_sysctl_flag(path), True)
+        # restored to original disabled state
+        self.assertIs(ct.read_sysctl_flag(path), False)
+        self.assertFalse(guard.changed)
+
+    def test_leaves_enabled_untouched(self):
+        path = self._tmp_flag("1\n")
+        guard = ct.AccountingGuard(sysctl=path)
+        with guard:
+            self.assertFalse(guard.changed)
+            self.assertIs(ct.read_sysctl_flag(path), True)
+        # still enabled, and never marked as changed -> not restored to off
+        self.assertIs(ct.read_sysctl_flag(path), True)
+
+    def test_unavailable_sysctl_is_noop(self):
+        guard = ct.AccountingGuard(sysctl="/nonexistent/sysctl/flag")
+        with guard:
+            self.assertFalse(guard.available)
+            self.assertFalse(guard.changed)
+        self.assertFalse(guard.enable_failed)
 
 
 if __name__ == "__main__":

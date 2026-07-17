@@ -255,6 +255,28 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     )
     rsrc.lower_priority()
 
+    # Turn on byte/packet accounting for the duration of the run and restore the
+    # host's original setting on exit (see AccountingGuard).
+    accounting = ct.AccountingGuard()
+    accounting.__enter__()
+    if not accounting.available:
+        log.info(
+            "nf_conntrack accounting sysctl unavailable (%s); leaving it untouched",
+            accounting.sysctl,
+        )
+    elif accounting.changed:
+        log.info(
+            "enabled nf_conntrack byte/packet accounting for this run "
+            "(was disabled; will restore on exit)"
+        )
+    elif accounting.enable_failed:
+        log.warning(
+            "could not enable nf_conntrack accounting (root required?); "
+            "byte/packet counts may be zero"
+        )
+    else:
+        log.debug("nf_conntrack accounting already enabled; leaving as-is")
+
     count = 0
     backend = ct.capture_backend(config.source)
     log.info(
@@ -312,3 +334,13 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
             except OSError as exc:
                 log.warning("failed to write HTML report to %s: %s", out_path, exc)
         store.close()
+        if accounting.changed:
+            accounting.restore()
+            if accounting.changed:
+                log.warning(
+                    "failed to restore nf_conntrack accounting to its original state"
+                )
+            else:
+                log.info(
+                    "restored nf_conntrack byte/packet accounting to its original (disabled) state"
+                )
