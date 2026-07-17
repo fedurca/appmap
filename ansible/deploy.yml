@@ -1,0 +1,53 @@
+---
+# Deploy the commatrix collector as a systemd service on every host.
+#
+#   ansible-playbook -i inventory.ini deploy.yml
+#
+# Idempotent: re-running updates the code (git checkout), refreshes the managed
+# config and restarts the service only when something changed.
+- name: Deploy commatrix collector
+  hosts: commatrix_hosts
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Ensure python3 (>=3.9) is present
+      ansible.builtin.command: python3 --version
+      changed_when: false
+
+    - name: Fetch commatrix source
+      ansible.builtin.git:
+        repo: "{{ commatrix_repo }}"
+        dest: "{{ commatrix_src_dir }}"
+        version: "{{ commatrix_version }}"
+        force: true
+      register: commatrix_checkout
+
+    - name: Install/refresh the commatrix system service
+      ansible.builtin.command:
+        cmd: "bash install.sh --no-start {{ '--as-root' if commatrix_run_as_root | bool else '' }}"
+        chdir: "{{ commatrix_src_dir }}"
+      register: commatrix_install
+      changed_when: "'installing' in commatrix_install.stdout | lower"
+
+    - name: Deploy managed configuration
+      ansible.builtin.template:
+        src: commatrix.conf.j2
+        dest: /etc/commatrix/commatrix.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart commatrix
+
+    - name: Enable and start the collector
+      ansible.builtin.systemd:
+        name: commatrix-collector.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: restart commatrix
+      ansible.builtin.systemd:
+        name: commatrix-collector.service
+        state: restarted

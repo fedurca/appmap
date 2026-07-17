@@ -1,0 +1,49 @@
+---
+# Merge the pulled snapshots into a central database on the control node and
+# generate the analytical overview (HTML dashboard + markdown matrix + security
+# + DoH/time posture). Runs entirely locally; requires the 'commatrix' CLI on
+# the control node (pip install ., or run from a checkout / python3 -m commatrix).
+#
+#   ansible-playbook -i inventory.ini report.yml
+- name: Aggregate snapshots and build the analytical report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    central_db: "{{ commatrix_local_dir }}/central.db"
+    snapshots_dir: "{{ commatrix_local_dir }}/snapshots"
+
+  tasks:
+    - name: Start from a fresh central database
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ central_db }}"
+        - "{{ central_db }}-wal"
+        - "{{ central_db }}-shm"
+
+    - name: Merge all host snapshots into the central database
+      ansible.builtin.command:
+        cmd: "{{ commatrix_bin }} aggregate --central {{ central_db }} --snapshot-dir {{ snapshots_dir }}"
+      changed_when: true
+
+    - name: Generate the HTML dashboard
+      ansible.builtin.command:
+        cmd: "{{ commatrix_bin }} report -f html -o {{ commatrix_local_dir }}/commatrix-report.html --database {{ central_db }}"
+      changed_when: true
+
+    - name: Generate the markdown communication matrix
+      ansible.builtin.command:
+        cmd: "{{ commatrix_bin }} report -f markdown -o {{ commatrix_local_dir }}/matrix.md --database {{ central_db }}"
+      changed_when: true
+
+    - name: Generate the security highlights
+      ansible.builtin.command:
+        cmd: "{{ commatrix_bin }} report -f security -o {{ commatrix_local_dir }}/security.md --database {{ central_db }}"
+      changed_when: true
+
+    - name: Report location
+      ansible.builtin.debug:
+        msg: "Analytical overview written to {{ commatrix_local_dir }}/commatrix-report.html"

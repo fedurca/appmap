@@ -1,0 +1,27 @@
+# Managed by Ansible - do not edit by hand.
+[collector]
+poll_interval = {{ commatrix_poll_interval }}
+database = /var/lib/commatrix/commatrix.db
+source = {{ commatrix_source }}
+
+[network]
+internal_cidrs = {{ commatrix_internal_cidrs }}
+resolve_external = false
+
+[export]
+snapshot_dir = /var/lib/commatrix/snapshots
+html_report = true
+
+[resources]
+cpu_budget_percent = {{ commatrix_cpu_budget_percent }}
+disk_budget_percent = {{ commatrix_disk_budget_percent }}
+retention_days = {{ commatrix_retention_days }}
+
+[dns]
+enabled = {{ commatrix_dns_enabled | string | lower }}
+enrich_flows = {{ commatrix_dns_enrich_flows | string | lower }}
+
+[time]
+{% if commatrix_ntp_check_server %}
+ntp_check_server = {{ commatrix_ntp_check_server }}
+{% endif %}

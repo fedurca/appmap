@@ -59,6 +59,11 @@ enabled = true
 # Annotate flows with the domain a peer IP was resolved from (extra column).
 enrich_flows = true
 
+[time]
+# Optional NTP server for an active SNTP offset probe (UDP/123). Leave empty to
+# read the clock offset from the local sync daemon (chrony/timesyncd) only.
+# ntp_check_server = pool.ntp.org
+
 [signatures]
 # Override the packaged signature directory if you maintain your own.
 # dir = /etc/commatrix/signatures

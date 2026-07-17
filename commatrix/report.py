@@ -467,24 +467,48 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
         else:
             sec_sections.append(f"<section><h3>{html.escape(title)}</h3><p>None observed.</p></section>")
 
-    # DoH posture per host (from stored host params).
+    # Posture per host (from stored host params): DoH + time synchronization.
     doh_rows = []
+    time_rows = []
     for h in store.list_hosts():
         params = store.get_host_params(h)
-        assessment = params.get("doh.assessment")
-        if assessment is None:
-            continue
-        enabled = params.get("doh.enabled_anywhere")
-        color = "#f87171" if enabled else "#4ade80"
-        doh_rows.append(
-            f"<li><strong>{html.escape(str(h))}</strong>: "
-            f'<span style="color:{color}">{html.escape(str(assessment))}</span></li>'
+        doh_assessment = params.get("doh.assessment")
+        if doh_assessment is not None:
+            enabled = params.get("doh.enabled_anywhere")
+            color = "#f87171" if enabled else "#4ade80"
+            doh_rows.append(
+                f"<li><strong>{html.escape(str(h))}</strong>: "
+                f'<span style="color:{color}">{html.escape(str(doh_assessment))}</span></li>'
+            )
+        time_assessment = params.get("time.assessment")
+        if time_assessment is not None:
+            synced = params.get("time.synchronized")
+            offset = params.get("time.offset_seconds")
+            bad = (not synced) or (offset is not None and abs(float(offset)) > 1.0)
+            color = "#f87171" if bad else "#4ade80"
+            extra = f" (offset {float(offset):+.3f}s)" if offset is not None else ""
+            time_rows.append(
+                f"<li><strong>{html.escape(str(h))}</strong>: "
+                f'<span style="color:{color}">{html.escape(str(time_assessment))}'
+                f"{html.escape(extra)}</span></li>"
+            )
+
+    posture_parts = []
+    if doh_rows:
+        posture_parts.append(
+            f"<section><h3>DNS-over-HTTPS posture</h3><ul>{''.join(doh_rows)}</ul>"
+            "<p style='color:#94a3b8;margin:.25rem 0 0'>DoH lets apps bypass the "
+            "system resolver and DNS logging; enforce it off for full visibility.</p></section>"
+        )
+    if time_rows:
+        posture_parts.append(
+            f"<section><h3>Time synchronization</h3><ul>{''.join(time_rows)}</ul>"
+            "<p style='color:#94a3b8;margin:.25rem 0 0'>Uptime/coverage and beacon "
+            "stats rely on the clock; an unsynced or skewed clock corrupts them.</p></section>"
         )
     doh_top = (
-        f'<section class="posture"><h2>DNS-over-HTTPS posture</h2><ul>{"".join(doh_rows)}</ul>'
-        "<p style='color:#94a3b8;margin:.25rem 0 0'>DoH lets apps bypass the system "
-        "resolver and DNS logging; enforce it off for full visibility.</p></section>"
-        if doh_rows else ""
+        f'<section class="posture"><h2>Host posture</h2>{"".join(posture_parts)}</section>'
+        if posture_parts else ""
     )
 
     mermaid = _mermaid_body(store)

@@ -16,6 +16,7 @@ from . import conntrack as ct
 from . import dns as dnsmod
 from . import dohcheck
 from . import resources as rsrc
+from . import timecheck
 from .catalog import Signatures, identify_service, load_signatures
 from .config import Config
 from .flows import NetworkClassifier, NormalizedFlow, local_ips_from_sockets, normalize_entries
@@ -219,6 +220,11 @@ class Collector:
             params.update(dohcheck.host_params())
         except Exception as exc:  # noqa: BLE001 - posture is best-effort
             log.debug("DoH posture check failed: %s", exc)
+        # Enrich with time-sync posture / clock offset (our stats rely on it).
+        try:
+            params.update(timecheck.host_params(self.config.ntp_check_server))
+        except Exception as exc:  # noqa: BLE001 - posture is best-effort
+            log.debug("time posture check failed: %s", exc)
         store.upsert_host(host, params)
 
 

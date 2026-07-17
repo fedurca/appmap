@@ -1,0 +1,28 @@
+---
+# Source of the commatrix code installed on each host. Point this at an internal
+# mirror in air-gapped environments (or use the copy-based deploy, see README).
+commatrix_repo: "https://github.com/fedurca/appmap.git"
+commatrix_version: "main"
+commatrix_src_dir: "/opt/commatrix/src"
+
+# Run the collector as root (full attribution + nf_conntrack sysctls + DNS log).
+commatrix_run_as_root: true
+
+# Managed collector configuration (rendered into /etc/commatrix/commatrix.conf).
+commatrix_poll_interval: 5
+commatrix_source: "auto"
+commatrix_retention_days: 30
+commatrix_cpu_budget_percent: 10
+commatrix_disk_budget_percent: 10
+commatrix_internal_cidrs: "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
+commatrix_dns_enabled: true
+commatrix_dns_enrich_flows: true
+# Optional NTP server for an active SNTP offset probe (empty = local daemon only).
+commatrix_ntp_check_server: ""
+
+# --- control-node paths (pull + merge + report) --------------------------
+# Directory on the CONTROL node where snapshots, the merged DB and the report
+# are written.
+commatrix_local_dir: "./commatrix-data"
+# commatrix CLI available on the control node (for aggregate + report).
+commatrix_bin: "commatrix"

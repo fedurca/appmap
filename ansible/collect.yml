@@ -1,0 +1,36 @@
+---
+# Pull each host's local database as a consistent JSON snapshot to the control
+# node (into {{ commatrix_local_dir }}/snapshots/<host>.json).
+#
+#   ansible-playbook -i inventory.ini collect.yml
+#
+# We use 'commatrix export' (a read-only, WAL-consistent dump) instead of copying
+# the raw .db file, so no locking/corruption concerns.
+- name: Collect commatrix snapshots
+  hosts: commatrix_hosts
+  become: true
+  gather_facts: false
+
+  vars:
+    remote_snapshot: "/var/lib/commatrix/snapshots/{{ inventory_hostname }}.json"
+
+  tasks:
+    - name: Export a JSON snapshot on the host
+      ansible.builtin.command:
+        cmd: "/usr/bin/commatrix export -o {{ remote_snapshot }}"
+      changed_when: true
+
+    - name: Ensure local snapshot directory exists
+      ansible.builtin.file:
+        path: "{{ commatrix_local_dir }}/snapshots"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Fetch snapshot to the control node
+      ansible.builtin.fetch:
+        src: "{{ remote_snapshot }}"
+        dest: "{{ commatrix_local_dir }}/snapshots/{{ inventory_hostname }}.json"
+        flat: true

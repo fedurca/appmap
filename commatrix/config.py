@@ -90,6 +90,11 @@ class Config:
     dns_enabled: bool = True  # log DNS queries via systemd-resolved monitor
     dns_enrich_flows: bool = True  # annotate flows with the resolved domain
 
+    # [time]
+    # Optional NTP server for an active SNTP offset probe (UDP/123). When empty,
+    # the offset is read from the local sync daemon only (no network).
+    ntp_check_server: Optional[str] = None
+
     # [resources]
     cpu_budget_percent: float = 10.0  # max % of TOTAL compute (all cores)
     disk_budget_percent: float = 10.0  # max % of free disk the DB may use
@@ -178,6 +183,10 @@ def load_config(path: Optional[str] = None) -> Config:
         sec = parser["dns"]
         cfg.dns_enabled = sec.getboolean("enabled", cfg.dns_enabled)
         cfg.dns_enrich_flows = sec.getboolean("enrich_flows", cfg.dns_enrich_flows)
+
+    if parser.has_section("time"):
+        sec = parser["time"]
+        cfg.ntp_check_server = sec.get("ntp_check_server", cfg.ntp_check_server) or None
 
     if parser.has_section("resources"):
         sec = parser["resources"]

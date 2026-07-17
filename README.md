@@ -89,6 +89,13 @@ commatrix-ctl logs | follow
 pip install .        # provides the `commatrix` command; also runnable as `python3 -m commatrix`
 ```
 
+### Fleet deployment (Ansible)
+
+`ansible/` ships playbooks to deploy the collector fleet-wide and then pull each
+host's local database, merge them on a control node and generate one analytical
+overview (`deploy.yml`, `collect.yml`, `report.yml`, `pull_and_report.yml`). See
+[`ansible/README.md`](ansible/README.md).
+
 ## Resource safety (never hurt the host)
 
 Commatrix is designed to be invisible to real workloads:

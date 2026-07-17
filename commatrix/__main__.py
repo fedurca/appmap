@@ -14,6 +14,7 @@ Subcommands:
   reactivation timeline).
 * ``dns``         -- print the DNS query log (from the system resolver monitor).
 * ``doh``         -- report the host's DNS-over-HTTPS posture (disabled/enforced?).
+* ``time``        -- report time-sync posture and clock offset (NTP accuracy).
 * ``restore-sysctls`` -- restore nf_conntrack sysctls from the persisted state
   file (used by the systemd ExecStopPost hook / crash recovery).
 """
@@ -330,6 +331,27 @@ def cmd_doh(args: argparse.Namespace) -> int:
     return 2 if dohcheck.doh_posture().get("doh_enabled_anywhere") else 0
 
 
+def cmd_time(args: argparse.Namespace) -> int:
+    """Report the host's time-sync posture and clock offset."""
+
+    from . import timecheck
+
+    config = load_config(args.config)
+    server = args.server or config.ntp_check_server
+    if args.format == "json":
+        text = json.dumps(timecheck.ntp_posture(server), indent=2, default=str) + "\n"
+    else:
+        text = timecheck.markdown(server)
+    _write_output(text, args.output)
+    posture = timecheck.ntp_posture(server)
+    # Non-zero exit if the clock is unsynced or materially off (for monitoring).
+    off = posture.get("offset_seconds")
+    bad = (not posture.get("synchronized")) or (
+        off is not None and abs(float(off)) > timecheck.LARGE_OFFSET_SECONDS
+    )
+    return 2 if bad else 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from .catalog import diff_edges
 
@@ -456,6 +478,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_doh.add_argument("-f", "--format", choices=["markdown", "json"], default="markdown")
     p_doh.add_argument("-o", "--output", help="output file (default stdout)")
     p_doh.set_defaults(func=cmd_doh)
+
+    p_time = sub.add_parser("time", help="report time-sync posture and clock offset")
+    _add_common(p_time)
+    p_time.add_argument("--server", help="NTP server for an active SNTP offset probe (UDP/123)")
+    p_time.add_argument("-f", "--format", choices=["markdown", "json"], default="markdown")
+    p_time.add_argument("-o", "--output", help="output file (default stdout)")
+    p_time.set_defaults(func=cmd_time)
 
     p_diff = sub.add_parser("diff", help="drift report between two snapshots")
     _add_common(p_diff)
