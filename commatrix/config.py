@@ -86,6 +86,10 @@ class Config:
     # [signatures]
     signatures_dir: Optional[str] = None  # None -> packaged defaults
 
+    # [dns]
+    dns_enabled: bool = True  # log DNS queries via systemd-resolved monitor
+    dns_enrich_flows: bool = True  # annotate flows with the resolved domain
+
     # [resources]
     cpu_budget_percent: float = 10.0  # max % of TOTAL compute (all cores)
     disk_budget_percent: float = 10.0  # max % of free disk the DB may use
@@ -169,6 +173,11 @@ def load_config(path: Optional[str] = None) -> Config:
     if parser.has_section("signatures"):
         sec = parser["signatures"]
         cfg.signatures_dir = sec.get("dir", cfg.signatures_dir)
+
+    if parser.has_section("dns"):
+        sec = parser["dns"]
+        cfg.dns_enabled = sec.getboolean("enabled", cfg.dns_enabled)
+        cfg.dns_enrich_flows = sec.getboolean("enrich_flows", cfg.dns_enrich_flows)
 
     if parser.has_section("resources"):
         sec = parser["resources"]

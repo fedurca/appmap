@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from . import conntrack as ct
+from . import dns as dnsmod
+from . import dohcheck
 from . import resources as rsrc
 from .catalog import Signatures, identify_service, load_signatures
 from .config import Config
@@ -44,6 +46,8 @@ class Collector:
         self._dns_cache: Dict[str, Optional[str]] = {}
         self._accounting_warned = False
         self.capture_backend = ct.capture_backend(config.source)
+        # Optional DNS monitor used to annotate peers with the resolved domain.
+        self.dns_monitor: Optional["dnsmod.DnsMonitor"] = None
 
     # -- socket / process context --------------------------------------
     def _socket_indexes(
@@ -146,6 +150,12 @@ class Collector:
             if self.config.resolve_external and flow.peer_class == "external":
                 peer_name = self._reverse_dns(flow.peer_ip)
 
+            # Domain the peer IP was resolved from (via the DNS monitor), kept
+            # as a separate field alongside the raw IP.
+            peer_domain = None
+            if self.dns_monitor is not None:
+                peer_domain = self.dns_monitor.lookup(flow.peer_ip)
+
             data_quality = None
             if self.capture_backend == "sockets":
                 data_quality = "socket-snapshot"
@@ -176,6 +186,7 @@ class Collector:
                     container_id=proc.container_id if proc else None,
                     l7_protocol=identity.l7_protocol,
                     data_quality=data_quality,
+                    peer_domain=peer_domain,
                 )
             )
         return edges
@@ -203,6 +214,11 @@ class Collector:
             zabbix_get_bin=self.config.zabbix_get,
             hostname_override=self.config.hostname,
         )
+        # Enrich with the host's DoH posture (disabled/enforced?).
+        try:
+            params.update(dohcheck.host_params())
+        except Exception as exc:  # noqa: BLE001 - posture is best-effort
+            log.debug("DoH posture check failed: %s", exc)
         store.upsert_host(host, params)
 
 
@@ -226,6 +242,12 @@ def _enforce_disk(config: Config, store: Store, governor: rsrc.ResourceGovernor)
             log.info(
                 "retention: pruned %d IR events older than %.0f days",
                 removed_events, config.retention_days,
+            )
+        removed_dns = store.prune_dns_events_older_than(cutoff)
+        if removed_dns:
+            log.info(
+                "retention: pruned %d DNS events older than %.0f days",
+                removed_dns, config.retention_days,
             )
 
     status = governor.disk_status(config.database, store.db_size_bytes())
@@ -340,6 +362,27 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
             "using sock_diag netlink for per-socket TCP byte/packet accounting "
             "(no nf_conntrack/conntrack-tools needed)"
         )
+
+    # Optional DNS query logging via the systemd-resolved monitor.
+    dns_monitor: Optional[dnsmod.DnsMonitor] = None
+    if config.dns_enabled:
+        if dnsmod.monitor_available():
+            dns_monitor = dnsmod.DnsMonitor()
+            dns_monitor.start()
+            if config.dns_enrich_flows:
+                collector.dns_monitor = dns_monitor
+            log.info(
+                "DNS query logging enabled via systemd-resolved monitor%s "
+                "(note: apps using their own DoH/DoT bypass this)",
+                " with flow enrichment" if config.dns_enrich_flows else "",
+            )
+        else:
+            log.info(
+                "DNS logging requested but the systemd-resolved monitor is "
+                "unavailable (needs systemd-resolved active, systemd >= 247); "
+                "DNS logging disabled"
+            )
+
     try:
         while iterations is None or count < iterations:
             start = time.time()
@@ -357,6 +400,11 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
                 else:
                     n = collector.poll_once(store, host, now=start)
                 log.debug("poll %d recorded %d edges", count, n)
+                if dns_monitor is not None and not paused:
+                    events = dns_monitor.drain()
+                    if events:
+                        store.record_dns_events(host, [e.to_row() for e in events])
+                        log.debug("recorded %d DNS events", len(events))
             except (PermissionError, FileNotFoundError):
                 break
 
@@ -376,6 +424,8 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     except KeyboardInterrupt:
         log.info("collector interrupted; shutting down")
     finally:
+        if dns_monitor is not None:
+            dns_monitor.stop()
         if config.html_report:
             from . import report as rp
 

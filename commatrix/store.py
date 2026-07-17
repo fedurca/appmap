@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Restrictive permissions: the database is a full internal network map and must
 # not be world-readable.
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS flows (
     container_id TEXT,
     l7_protocol TEXT,
     data_quality TEXT,
+    peer_domain TEXT,
     UNIQUE (host, proto, direction, local_ip, peer_ip, service_port)
 );
 
@@ -100,6 +101,24 @@ CREATE TABLE IF NOT EXISTS flow_events (
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON flow_events (ts);
 CREATE INDEX IF NOT EXISTS idx_events_host ON flow_events (host, ts);
+
+-- Append-only DNS query log (from the system resolver monitor). Gives the
+-- actual names looked up and the addresses returned, for IR and for enriching
+-- flows with the domain a peer IP was resolved from.
+CREATE TABLE IF NOT EXISTS dns_events (
+    id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    host TEXT NOT NULL,
+    qname TEXT,
+    qtype TEXT,
+    rcode TEXT,
+    answers TEXT,          -- comma-separated resolved addresses
+    source TEXT            -- e.g. resolved-monitor
+);
+
+CREATE INDEX IF NOT EXISTS idx_dns_ts ON dns_events (ts);
+CREATE INDEX IF NOT EXISTS idx_dns_host ON dns_events (host, ts);
+CREATE INDEX IF NOT EXISTS idx_dns_qname ON dns_events (qname);
 """
 
 
@@ -125,6 +144,7 @@ class EdgeObservation:
     container_id: Optional[str] = None
     l7_protocol: Optional[str] = None
     data_quality: Optional[str] = None
+    peer_domain: Optional[str] = None
 
 
 class Store:
@@ -156,6 +176,7 @@ class Store:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA busy_timeout=5000;")
         self.init_schema()
         # Tighten permissions on files/dirs we create (best-effort).
         self._restrict_permissions(path, directory, created_dir, db_existed)
@@ -179,11 +200,23 @@ class Store:
 
     def init_schema(self) -> None:
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns/tables introduced after v1 to pre-existing databases.
+
+        ``CREATE TABLE IF NOT EXISTS`` cannot add a column to an existing table,
+        so new columns are added with ALTER TABLE when missing.
+        """
+
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(flows)")}
+        if "peer_domain" not in cols:
+            self.conn.execute("ALTER TABLE flows ADD COLUMN peer_domain TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -245,8 +278,8 @@ class Store:
                     last_snapshot_packets, first_seen, last_seen, last_active,
                     max_gap, observations, service_side, service_name,
                     process_comm, process_exe, unit, package, container_id,
-                    l7_protocol, data_quality
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    l7_protocol, data_quality, peer_domain
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     host, obs.proto, obs.direction, obs.local_ip, obs.peer_ip, obs.service_port,
@@ -254,6 +287,7 @@ class Store:
                     obs.snapshot_bytes, obs.snapshot_packets, now, now, now,
                     obs.service_side, obs.service_name, obs.process_comm, obs.process_exe,
                     obs.unit, obs.package, obs.container_id, obs.l7_protocol, obs.data_quality,
+                    obs.peer_domain,
                 ),
             )
             self._append_event("new", host, obs, now, obs.snapshot_bytes, obs.snapshot_packets, 0.0)
@@ -308,7 +342,8 @@ class Store:
                 unit=COALESCE(?, unit), package=COALESCE(?, package),
                 container_id=COALESCE(?, container_id),
                 l7_protocol=COALESCE(?, l7_protocol),
-                data_quality=?
+                data_quality=?,
+                peer_domain=COALESCE(?, peer_domain)
             WHERE host=? AND proto=? AND direction=? AND local_ip=? AND peer_ip=? AND service_port=?
             """,
             (
@@ -318,7 +353,7 @@ class Store:
                 obs.service_side, obs.service_name,
                 obs.process_comm, obs.process_exe,
                 obs.unit, obs.package, obs.container_id, obs.l7_protocol,
-                obs.data_quality,
+                obs.data_quality, obs.peer_domain,
                 host, obs.proto, obs.direction, obs.local_ip, obs.peer_ip, obs.service_port,
             ),
         )
@@ -388,6 +423,76 @@ class Store:
         self.conn.commit()
         return cur.rowcount
 
+    # -- DNS query log (append-only) ------------------------------------
+    def record_dns_event(
+        self,
+        host: str,
+        ts: float,
+        qname: Optional[str],
+        qtype: Optional[str],
+        rcode: Optional[str],
+        answers: Optional[str],
+        source: str = "resolved-monitor",
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO dns_events (ts, host, qname, qtype, rcode, answers, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, host, qname, qtype, rcode, answers, source),
+        )
+
+    def record_dns_events(self, host: str, events: Iterable[Dict[str, object]]) -> int:
+        count = 0
+        for ev in events:
+            self.record_dns_event(
+                host,
+                float(ev.get("ts") or time.time()),
+                ev.get("qname"),
+                ev.get("qtype"),
+                ev.get("rcode"),
+                ev.get("answers"),
+                str(ev.get("source") or "resolved-monitor"),
+            )
+            count += 1
+        if count:
+            self.conn.commit()
+        return count
+
+    def iter_dns_events(
+        self,
+        host: Optional[str] = None,
+        since: Optional[float] = None,
+        qname: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[sqlite3.Row]:
+        clauses: List[str] = []
+        params: List[object] = []
+        if host:
+            clauses.append("host=?")
+            params.append(host)
+        if since is not None:
+            clauses.append("ts>=?")
+            params.append(since)
+        if qname:
+            clauses.append("qname LIKE ?")
+            params.append(f"%{qname}%")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM dns_events{where} ORDER BY ts DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return list(self.conn.execute(sql, params))
+
+    def dns_event_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) AS c FROM dns_events").fetchone()
+        return int(row["c"]) if row else 0
+
+    def prune_dns_events_older_than(self, cutoff_ts: float) -> int:
+        cur = self.conn.execute("DELETE FROM dns_events WHERE ts < ?", (cutoff_ts,))
+        self.conn.commit()
+        return cur.rowcount
+
     def record_edges(self, host: str, edges: Iterable[EdgeObservation], now: Optional[float] = None) -> int:
         if now is None:
             now = time.time()
@@ -446,14 +551,14 @@ class Store:
                     last_snapshot_packets, first_seen, last_seen, last_active,
                     max_gap, observations, service_side, service_name,
                     process_comm, process_exe, unit, package, container_id,
-                    l7_protocol, data_quality
+                    l7_protocol, data_quality, peer_domain
                 ) VALUES (
                     :host, :proto, :direction, :local_ip, :peer_ip, :service_port,
                     :peer_class, :peer_name, :bytes, :packets, :last_snapshot_bytes,
                     :last_snapshot_packets, :first_seen, :last_seen, :last_active,
                     :max_gap, :observations, :service_side, :service_name,
                     :process_comm, :process_exe, :unit, :package, :container_id,
-                    :l7_protocol, :data_quality
+                    :l7_protocol, :data_quality, :peer_domain
                 )
                 ON CONFLICT (host, proto, direction, local_ip, peer_ip, service_port)
                 DO UPDATE SET
@@ -475,7 +580,8 @@ class Store:
                     package=excluded.package,
                     container_id=excluded.container_id,
                     l7_protocol=excluded.l7_protocol,
-                    data_quality=excluded.data_quality
+                    data_quality=excluded.data_quality,
+                    peer_domain=COALESCE(excluded.peer_domain, flows.peer_domain)
                 """,
                 _flow_row_defaults(f),
             )
@@ -566,6 +672,6 @@ def _flow_row_defaults(f: Dict[str, object]) -> Dict[str, object]:
         "last_snapshot_packets",
         "first_seen", "last_seen", "last_active", "max_gap", "observations",
         "service_side", "service_name", "process_comm", "process_exe", "unit",
-        "package", "container_id", "l7_protocol", "data_quality",
+        "package", "container_id", "l7_protocol", "data_quality", "peer_domain",
     ]
     return {k: f.get(k) for k in keys}

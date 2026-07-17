@@ -30,7 +30,7 @@ CLEARTEXT_L7 = {
 
 MATRIX_COLUMNS = [
     "host", "direction", "local_ip", "service_port", "service_name", "l7_protocol",
-    "peer_ip", "peer_name", "peer_class", "bytes", "packets",
+    "peer_ip", "peer_name", "peer_domain", "peer_class", "bytes", "packets",
     "first_seen", "last_seen", "max_gap", "observations",
     "process_comm", "unit", "package", "container_id", "data_quality",
 ]
@@ -96,7 +96,7 @@ def matrix_markdown(store: Store, host: Optional[str] = None) -> str:
     rows = _rows(store, host)
     lines = ["# Communication matrix", ""]
     header = [
-        "Host", "Dir", "Service", "Port", "L7", "Peer", "Class",
+        "Host", "Dir", "Service", "Port", "L7", "Peer", "Domain", "Class",
         "Bytes", "First seen", "Last seen", "Max gap", "Seen (n)", "Process",
     ]
     lines.append("| " + " | ".join(header) + " |")
@@ -113,6 +113,7 @@ def matrix_markdown(store: Store, host: Optional[str] = None) -> str:
                     str(r.get("service_port", "")),
                     str(r.get("l7_protocol") or ""),
                     str(peer or ""),
+                    str(r.get("peer_domain") or ""),
                     str(r.get("peer_class") or ""),
                     human_bytes(r.get("bytes")),
                     fmt_time(r.get("first_seen")),
@@ -273,7 +274,7 @@ def vt_peer_html(row: Dict[str, object]) -> str:
 
 def _matrix_html_table(rows: List[Dict[str, object]], limit: int = 100) -> str:
     header = [
-        "Host", "Dir", "Service", "Port", "Peer", "Class", "Bytes",
+        "Host", "Dir", "Service", "Port", "Peer", "Domain", "Class", "Bytes",
         "First seen", "Last seen", "Seen (n)", "Process",
     ]
     lines = ["<table>", "<thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in header) + "</tr></thead>", "<tbody>"]
@@ -286,6 +287,7 @@ def _matrix_html_table(rows: List[Dict[str, object]], limit: int = 100) -> str:
             html.escape(str(row.get("service_name", ""))),
             html.escape(str(row.get("service_port", ""))),
             vt_peer_html(row),
+            html.escape(str(row.get("peer_domain") or "")),
             html.escape(str(row.get("peer_class") or "")),
             html.escape(human_bytes(row.get("bytes"))),
             html.escape(fmt_time(row.get("first_seen"))),
@@ -355,6 +357,26 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
         else:
             sec_sections.append(f"<section><h3>{html.escape(title)}</h3><p>None observed.</p></section>")
 
+    # DoH posture per host (from stored host params).
+    doh_rows = []
+    for h in store.list_hosts():
+        params = store.get_host_params(h)
+        assessment = params.get("doh.assessment")
+        if assessment is None:
+            continue
+        enabled = params.get("doh.enabled_anywhere")
+        color = "#f87171" if enabled else "#4ade80"
+        doh_rows.append(
+            f"<li><strong>{html.escape(str(h))}</strong>: "
+            f'<span style="color:{color}">{html.escape(str(assessment))}</span></li>'
+        )
+    doh_section = (
+        f"<section><h3>DNS-over-HTTPS posture</h3><ul>{''.join(doh_rows)}</ul>"
+        "<p style='color:#94a3b8'>DoH lets apps bypass the system resolver and DNS "
+        "logging; enforce it off for full visibility.</p></section>"
+        if doh_rows else ""
+    )
+
     mermaid = _mermaid_body(store)
 
     return f"""<!DOCTYPE html>
@@ -419,7 +441,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     <div class="panel">{_matrix_html_table(rows)}</div>
 
     <h2>Security highlights</h2>
-    <div class="panel">{''.join(sec_sections)}</div>
+    <div class="panel">{''.join(sec_sections)}{doh_section}</div>
   </main>
   <footer>Commatrix HTML report — stdlib collector, inline SVG charts</footer>
 </body>

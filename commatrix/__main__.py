@@ -12,6 +12,8 @@ Subcommands:
 * ``diff``        -- drift report between two JSON snapshots.
 * ``history``     -- print the append-only IR event log (edge first-seen /
   reactivation timeline).
+* ``dns``         -- print the DNS query log (from the system resolver monitor).
+* ``doh``         -- report the host's DNS-over-HTTPS posture (disabled/enforced?).
 * ``restore-sysctls`` -- restore nf_conntrack sysctls from the persisted state
   file (used by the systemd ExecStopPost hook / crash recovery).
 """
@@ -280,6 +282,54 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dns(args: argparse.Namespace) -> int:
+    """Print the append-only DNS query log."""
+
+    import time as _time
+
+    from .store import Store
+
+    config = load_config(args.config)
+    db = args.database or config.database
+    since = _time.time() - args.since_seconds if args.since_seconds else None
+    store = Store(db, read_only=True)
+    try:
+        rows = [dict(r) for r in store.iter_dns_events(
+            host=args.host, since=since, qname=args.qname, limit=args.limit
+        )]
+    finally:
+        store.close()
+
+    if args.format == "jsonl":
+        text = "".join(json.dumps(r, default=str) + "\n" for r in rows)
+    else:
+        lines = ["| Time | Host | Query | Type | Rcode | Answers |",
+                 "|---|---|---|---|---|---|"]
+        for r in rows:
+            ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(r.get("ts") or 0))
+            lines.append(
+                f"| {ts} | {r.get('host','')} | {r.get('qname') or ''} | "
+                f"{r.get('qtype') or ''} | {r.get('rcode') or ''} | {r.get('answers') or ''} |"
+            )
+        text = "\n".join(lines) + "\n"
+    _write_output(text, args.output)
+    return 0
+
+
+def cmd_doh(args: argparse.Namespace) -> int:
+    """Report the host's DNS-over-HTTPS posture (disabled/enforced?)."""
+
+    from . import dohcheck
+
+    if args.format == "json":
+        text = json.dumps(dohcheck.doh_posture(), indent=2, default=str) + "\n"
+    else:
+        text = dohcheck.markdown()
+    _write_output(text, args.output)
+    # Non-zero exit if DoH is enabled somewhere (useful for monitoring/CI).
+    return 2 if dohcheck.doh_posture().get("doh_enabled_anywhere") else 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from .catalog import diff_edges
 
@@ -389,6 +439,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("-f", "--format", choices=["markdown", "jsonl"], default="markdown")
     p_hist.add_argument("-o", "--output", help="output file (default stdout)")
     p_hist.set_defaults(func=cmd_history)
+
+    p_dns = sub.add_parser("dns", help="print the DNS query log")
+    _add_common(p_dns)
+    p_dns.add_argument("--database", help="database path")
+    p_dns.add_argument("--host", help="restrict to a single host")
+    p_dns.add_argument("--qname", help="filter by query name substring")
+    p_dns.add_argument("--since-seconds", type=float, help="only events newer than N seconds")
+    p_dns.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
+    p_dns.add_argument("-f", "--format", choices=["markdown", "jsonl"], default="markdown")
+    p_dns.add_argument("-o", "--output", help="output file (default stdout)")
+    p_dns.set_defaults(func=cmd_dns)
+
+    p_doh = sub.add_parser("doh", help="report DNS-over-HTTPS posture (disabled/enforced?)")
+    _add_common(p_doh)
+    p_doh.add_argument("-f", "--format", choices=["markdown", "json"], default="markdown")
+    p_doh.add_argument("-o", "--output", help="output file (default stdout)")
+    p_doh.set_defaults(func=cmd_doh)
 
     p_diff = sub.add_parser("diff", help="drift report between two snapshots")
     _add_common(p_diff)

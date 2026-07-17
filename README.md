@@ -265,6 +265,34 @@ commatrix history -f jsonl --since-seconds 3600 --kind new              # for SI
 The database and exported snapshots are created `0640` (dir `0750`) so the
 network map is not world-readable.
 
+## DNS query logging and DoH posture
+
+When `systemd-resolved` is the active resolver (systemd ≥ 247), commatrix can
+log DNS queries via its monitor interface (the same source as `resolvectl
+monitor`) — pure stdlib, no packages. It records an append-only DNS log and, by
+default, annotates flows with the **domain** each peer IP was resolved from (a
+`Domain`/`peer_domain` column alongside the raw IP):
+
+```bash
+commatrix dns --database /var/lib/commatrix/commatrix.db          # query log
+commatrix dns -f jsonl --qname example.com                        # for SIEM
+```
+
+DNS logging **requires root** (the monitor subscription is privileged); run the
+service with `install.sh --as-root`. It only sees queries via the system
+resolver — apps doing their own **DoH/DoT bypass it**.
+
+Check whether DoH is disabled/enforced on the host (so DNS stays visible):
+
+```bash
+commatrix doh            # markdown posture report (exit 2 if DoH enabled anywhere)
+```
+
+`doh` inspects Chrome/Chromium/Edge managed policies (`DnsOverHttpsMode`),
+Firefox enterprise policy (`DNSOverHTTPS`), and systemd-resolved `DNSOverTLS`,
+and the posture is also stored in host parameters and surfaced in the HTML
+report. "Enforced off" means a locked/managed policy users cannot override.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).

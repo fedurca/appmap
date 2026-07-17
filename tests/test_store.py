@@ -74,6 +74,56 @@ class StoreTest(unittest.TestCase):
             central.close()
 
 
+class StorePeerDomainTest(unittest.TestCase):
+    def test_peer_domain_stored_and_exported(self):
+        tmp = tempfile.mkdtemp()
+        s = Store(os.path.join(tmp, "t.db"))
+        obs = make_obs(100, 2)
+        obs.peer_domain = "db.internal.example.com"
+        s.record_edge("web01", obs, now=1.0)
+        rows = s.iter_flows("web01")
+        self.assertEqual(rows[0]["peer_domain"], "db.internal.example.com")
+        payload = s.export_dict()
+        self.assertEqual(payload["flows"][0]["peer_domain"], "db.internal.example.com")
+        s.close()
+
+    def test_migration_adds_peer_domain_to_old_db(self):
+        import sqlite3
+        tmp = tempfile.mkdtemp()
+        db = os.path.join(tmp, "old.db")
+        # Simulate a pre-v3 flows table without peer_domain.
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE flows (id INTEGER PRIMARY KEY, host TEXT, proto TEXT, "
+            "direction TEXT, local_ip TEXT, peer_ip TEXT, service_port INTEGER, "
+            "UNIQUE(host, proto, direction, local_ip, peer_ip, service_port))"
+        )
+        conn.commit()
+        conn.close()
+        s = Store(db)  # should ALTER TABLE to add peer_domain
+        cols = {r[1] for r in s.conn.execute("PRAGMA table_info(flows)")}
+        self.assertIn("peer_domain", cols)
+        s.close()
+
+
+class StoreDnsEventsTest(unittest.TestCase):
+    def test_record_and_query_dns_events(self):
+        tmp = tempfile.mkdtemp()
+        s = Store(os.path.join(tmp, "t.db"))
+        n = s.record_dns_events("web01", [
+            {"ts": 1000.0, "qname": "a.example.com", "qtype": "A", "rcode": "0", "answers": "1.2.3.4"},
+            {"ts": 1001.0, "qname": "b.example.com", "qtype": "AAAA", "rcode": "0", "answers": "::1"},
+        ])
+        self.assertEqual(n, 2)
+        self.assertEqual(s.dns_event_count(), 2)
+        rows = s.iter_dns_events(qname="a.example")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["answers"], "1.2.3.4")
+        self.assertEqual(s.prune_dns_events_older_than(1000.5), 1)
+        self.assertEqual(s.dns_event_count(), 1)
+        s.close()
+
+
 class StorePermissionsTest(unittest.TestCase):
     def test_db_created_not_world_readable(self):
         tmp = tempfile.mkdtemp()
