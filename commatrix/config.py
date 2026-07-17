@@ -60,6 +60,14 @@ class Config:
     # Where pre-run nf_conntrack sysctl values are persisted so they can be
     # restored after an unclean exit (see conntrack.SysctlGuard).
     sysctl_state_file: str = "/run/commatrix/sysctl.state"
+    # By default commatrix runs unprivileged (topology is still captured;
+    # sysctl toggling and full process attribution then need CAP_NET_ADMIN /
+    # CAP_DAC_READ_SEARCH or root). Set true to hard-require root.
+    require_root: bool = False
+    # Append-only IR history: log a "reactivated" event when an edge becomes
+    # active again after being idle at least this many seconds (0 = only log
+    # brand-new edges).
+    event_min_gap_seconds: float = 60.0
 
     # [network]
     internal_cidrs: List[str] = field(default_factory=lambda: list(DEFAULT_INTERNAL_CIDRS))
@@ -137,6 +145,8 @@ def load_config(path: Optional[str] = None) -> Config:
         cfg.source = sec.get("source", cfg.source)
         cfg.hostname = sec.get("hostname", cfg.hostname)
         cfg.sysctl_state_file = sec.get("sysctl_state_file", cfg.sysctl_state_file)
+        cfg.require_root = sec.getboolean("require_root", cfg.require_root)
+        cfg.event_min_gap_seconds = sec.getfloat("event_min_gap_seconds", cfg.event_min_gap_seconds)
 
     if parser.has_section("network"):
         sec = parser["network"]

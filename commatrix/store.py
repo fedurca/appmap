@@ -21,7 +21,12 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Restrictive permissions: the database is a full internal network map and must
+# not be world-readable.
+DB_FILE_MODE = 0o640
+DB_DIR_MODE = 0o750
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -68,6 +73,33 @@ CREATE TABLE IF NOT EXISTS flows (
 
 CREATE INDEX IF NOT EXISTS idx_flows_host ON flows (host);
 CREATE INDEX IF NOT EXISTS idx_flows_service ON flows (host, service_port, direction);
+
+-- Append-only event log for incident response: a timeline of when edges first
+-- appeared and when they became active again after being idle. Never updated,
+-- only inserted (and pruned by retention/disk budget).
+CREATE TABLE IF NOT EXISTS flow_events (
+    id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    host TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- 'new' | 'reactivated'
+    proto TEXT,
+    direction TEXT,
+    local_ip TEXT,
+    peer_ip TEXT,
+    service_port INTEGER,
+    peer_class TEXT,
+    peer_name TEXT,
+    service_name TEXT,
+    l7_protocol TEXT,
+    process_comm TEXT,
+    process_exe TEXT,
+    bytes_delta INTEGER DEFAULT 0,
+    packets_delta INTEGER DEFAULT 0,
+    idle_gap REAL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_ts ON flow_events (ts);
+CREATE INDEX IF NOT EXISTS idx_events_host ON flow_events (host, ts);
 """
 
 
@@ -96,15 +128,54 @@ class EdgeObservation:
 
 
 class Store:
-    def __init__(self, path: str):
+    def __init__(
+        self,
+        path: str,
+        read_only: bool = False,
+        event_min_gap: float = 60.0,
+    ):
         self.path = path
+        self.read_only = read_only
+        # Only log a "reactivated" IR event when an edge resumes activity after
+        # being idle at least this long.
+        self.event_min_gap = event_min_gap
+
+        if read_only:
+            # Open without creating or writing anything (works on a DB owned by
+            # another user as long as it is group/other readable).
+            self.conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            self.conn.row_factory = sqlite3.Row
+            return
+
         directory = os.path.dirname(os.path.abspath(path))
+        created_dir = False
         if directory and not os.path.isdir(directory):
-            os.makedirs(directory, exist_ok=True)
+            os.makedirs(directory, mode=DB_DIR_MODE, exist_ok=True)
+            created_dir = True
+        db_existed = os.path.exists(path)
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.init_schema()
+        # Tighten permissions on files/dirs we create (best-effort).
+        self._restrict_permissions(path, directory, created_dir, db_existed)
+
+    @staticmethod
+    def _restrict_permissions(path, directory, created_dir, db_existed) -> None:
+        try:
+            if not db_existed:
+                os.chmod(path, DB_FILE_MODE)
+                for suffix in ("-wal", "-shm"):
+                    if os.path.exists(path + suffix):
+                        os.chmod(path + suffix, DB_FILE_MODE)
+            if created_dir and directory:
+                os.chmod(directory, DB_DIR_MODE)
+        except OSError:
+            pass
+
+    def _readonly_guard(self) -> None:
+        if self.read_only:
+            raise RuntimeError("Store opened read-only; writes are not permitted")
 
     def init_schema(self) -> None:
         self.conn.executescript(_SCHEMA)
@@ -185,6 +256,7 @@ class Store:
                     obs.unit, obs.package, obs.container_id, obs.l7_protocol, obs.data_quality,
                 ),
             )
+            self._append_event("new", host, obs, now, obs.snapshot_bytes, obs.snapshot_packets, 0.0)
             self.conn.commit()
             return
 
@@ -217,6 +289,11 @@ class Store:
             gap = now - last_active
             if gap > max_gap:
                 max_gap = gap
+            # Append-only IR event when a flow wakes up after a meaningful idle.
+            if gap >= self.event_min_gap > 0:
+                self._append_event(
+                    "reactivated", host, obs, now, byte_delta, packet_delta, gap
+                )
         new_last_active = now if activity else last_active
 
         self.conn.execute(
@@ -246,6 +323,70 @@ class Store:
             ),
         )
         self.conn.commit()
+
+    def _append_event(
+        self,
+        kind: str,
+        host: str,
+        obs: "EdgeObservation",
+        ts: float,
+        bytes_delta: int,
+        packets_delta: int,
+        idle_gap: float,
+    ) -> None:
+        """Insert an append-only IR event. Never updates existing rows."""
+
+        self.conn.execute(
+            """
+            INSERT INTO flow_events (
+                ts, host, kind, proto, direction, local_ip, peer_ip,
+                service_port, peer_class, peer_name, service_name, l7_protocol,
+                process_comm, process_exe, bytes_delta, packets_delta, idle_gap
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts, host, kind, obs.proto, obs.direction, obs.local_ip, obs.peer_ip,
+                obs.service_port, obs.peer_class, obs.peer_name, obs.service_name,
+                obs.l7_protocol, obs.process_comm, obs.process_exe,
+                int(bytes_delta or 0), int(packets_delta or 0), float(idle_gap or 0.0),
+            ),
+        )
+
+    def iter_events(
+        self,
+        host: Optional[str] = None,
+        since: Optional[float] = None,
+        kind: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[sqlite3.Row]:
+        """Read the append-only IR event log, newest first."""
+
+        clauses = []
+        params: List[object] = []
+        if host:
+            clauses.append("host=?")
+            params.append(host)
+        if since is not None:
+            clauses.append("ts>=?")
+            params.append(since)
+        if kind:
+            clauses.append("kind=?")
+            params.append(kind)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM flow_events{where} ORDER BY ts DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        return list(self.conn.execute(sql, params))
+
+    def event_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) AS c FROM flow_events").fetchone()
+        return int(row["c"]) if row else 0
+
+    def prune_events_older_than(self, cutoff_ts: float) -> int:
+        cur = self.conn.execute("DELETE FROM flow_events WHERE ts < ?", (cutoff_ts,))
+        self.conn.commit()
+        return cur.rowcount
 
     def record_edges(self, host: str, edges: Iterable[EdgeObservation], now: Optional[float] = None) -> int:
         if now is None:
@@ -390,6 +531,17 @@ class Store:
             total = self.flow_count()
             if total == 0:
                 break
+            # Trim the oldest IR events alongside flows so history cannot grow
+            # unbounded under disk pressure (retention still applies too).
+            ev_total = self.event_count()
+            if ev_total > 0:
+                ev_batch = max(1, int(ev_total * batch_fraction))
+                self.conn.execute(
+                    "DELETE FROM flow_events WHERE id IN "
+                    "(SELECT id FROM flow_events ORDER BY ts ASC LIMIT ?)",
+                    (ev_batch,),
+                )
+                self.conn.commit()
             batch = max(1, int(total * batch_fraction))
             cur = self.conn.execute(
                 """

@@ -10,6 +10,8 @@ Subcommands:
 * ``report``      -- generate matrix / catalog / diagram / security outputs.
 * ``hostparams``  -- print resolved Zabbix host parameters (debug / UserParameter).
 * ``diff``        -- drift report between two JSON snapshots.
+* ``history``     -- print the append-only IR event log (edge first-seen /
+  reactivation timeline).
 * ``restore-sysctls`` -- restore nf_conntrack sysctls from the persisted state
   file (used by the systemd ExecStopPost hook / crash recovery).
 """
@@ -48,19 +50,30 @@ def _write_output(text: str, output: Optional[str]) -> None:
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
+    import os
+
     from .collector import run_loop
     from .conntrack import is_root, running_under_systemd
 
     log = logging.getLogger("commatrix")
+    config = load_config(args.config)
+    if args.database:
+        config.database = args.database
 
-    # The collector mutates kernel sysctls and reads other processes'
-    # /proc/<pid>/fd, so it must run as root.
-    if not is_root():
-        log.warning("commatrix collect must run as root; refusing to start")
+    # Root is optional: by default the collector runs unprivileged (topology is
+    # still captured). Only hard-require root when asked (flag or config), e.g.
+    # when full sysctl accounting / cross-user attribution is mandatory.
+    require_root = args.require_root or config.require_root
+    if require_root and not is_root():
+        log.warning(
+            "root required (--require-root/require_root set) but running as "
+            "uid=%d; refusing to start",
+            os.geteuid(),
+        )
         return 1
 
     # By design commatrix is run as a systemd service (which also enforces the
-    # CPU/memory limits and restores sysctls via ExecStopPost). Refuse to run
+    # CPU/memory limits, capabilities and sysctl restore). Refuse to run
     # otherwise unless explicitly overridden for labs/testing.
     if not running_under_systemd() and not args.allow_manual:
         log.warning(
@@ -70,9 +83,14 @@ def cmd_collect(args: argparse.Namespace) -> int:
         )
         return 0
 
-    config = load_config(args.config)
-    if args.database:
-        config.database = args.database
+    if not is_root():
+        log.info(
+            "running unprivileged (uid=%d): topology is captured; toggling "
+            "nf_conntrack sysctls and attributing other users' processes need "
+            "CAP_NET_ADMIN / CAP_DAC_READ_SEARCH (or root)",
+            os.geteuid(),
+        )
+
     iterations = 1 if args.once else args.iterations
     run_loop(config, iterations=iterations)
     return 0
@@ -103,7 +121,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     if out == "-":
         from .store import Store
 
-        store = Store(db)
+        store = Store(db, read_only=True)
         try:
             payload = store.export_dict(args.host)
         finally:
@@ -171,7 +189,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     config = load_config(args.config)
     db = args.database or config.database
-    store = Store(db)
+    store = Store(db, read_only=True)
     try:
         fmt = args.format
         if fmt == "csv":
@@ -213,6 +231,55 @@ def cmd_hostparams(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    """Print the append-only IR event log (edge first-seen / reactivation)."""
+
+    import time as _time
+
+    from .store import Store
+
+    config = load_config(args.config)
+    db = args.database or config.database
+    since = None
+    if args.since_seconds:
+        since = _time.time() - args.since_seconds
+    store = Store(db, read_only=True)
+    try:
+        rows = [dict(r) for r in store.iter_events(
+            host=args.host, since=since, kind=args.kind, limit=args.limit
+        )]
+    finally:
+        store.close()
+
+    if args.format == "jsonl":
+        text = "".join(json.dumps(r, default=str) + "\n" for r in rows)
+    else:  # markdown
+        header = "| Time | Host | Kind | Dir | Service | Port | L7 | Peer | Class | Process | Idle gap |"
+        sep = "|---|---|---|---|---|---|---|---|---|---|---|"
+        lines = [header, sep]
+        for r in rows:
+            ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(r.get("ts") or 0))
+            lines.append(
+                "| {ts} | {host} | {kind} | {direction} | {service_name} | {service_port} | "
+                "{l7_protocol} | {peer_ip} | {peer_class} | {process_comm} | {idle:.0f}s |".format(
+                    ts=ts,
+                    host=r.get("host", ""),
+                    kind=r.get("kind", ""),
+                    direction=r.get("direction", "") or "",
+                    service_name=r.get("service_name", "") or "",
+                    service_port=r.get("service_port", "") or "",
+                    l7_protocol=r.get("l7_protocol", "") or "",
+                    peer_ip=r.get("peer_ip", "") or "",
+                    peer_class=r.get("peer_class", "") or "",
+                    process_comm=r.get("process_comm", "") or "",
+                    idle=float(r.get("idle_gap") or 0),
+                )
+            )
+        text = "\n".join(lines) + "\n"
+    _write_output(text, args.output)
+    return 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from .catalog import diff_edges
 
@@ -244,7 +311,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument(
         "--allow-manual",
         action="store_true",
-        help="allow running outside systemd (labs/testing); still requires root",
+        help="allow running outside systemd (labs/testing)",
+    )
+    p_collect.add_argument(
+        "--require-root",
+        action="store_true",
+        help="refuse to start unless running as root",
     )
     p_collect.set_defaults(func=cmd_collect)
 
@@ -306,6 +378,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_hp)
     p_hp.add_argument("-o", "--output", help="output file (default stdout)")
     p_hp.set_defaults(func=cmd_hostparams)
+
+    p_hist = sub.add_parser("history", help="print the append-only IR event log")
+    _add_common(p_hist)
+    p_hist.add_argument("--database", help="database path")
+    p_hist.add_argument("--host", help="restrict to a single host")
+    p_hist.add_argument("--kind", choices=["new", "reactivated"], help="filter by event kind")
+    p_hist.add_argument("--since-seconds", type=float, help="only events newer than N seconds")
+    p_hist.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
+    p_hist.add_argument("-f", "--format", choices=["markdown", "jsonl"], default="markdown")
+    p_hist.add_argument("-o", "--output", help="output file (default stdout)")
+    p_hist.set_defaults(func=cmd_history)
 
     p_diff = sub.add_parser("diff", help="drift report between two snapshots")
     _add_common(p_diff)

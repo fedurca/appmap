@@ -21,7 +21,7 @@ log = logging.getLogger("commatrix.aggregate")
 def export_snapshot(db_path: str, out_path: str, host: str = None) -> str:  # type: ignore[assignment]
     """Export a host database to a JSON snapshot file. Returns the path."""
 
-    store = Store(db_path)
+    store = Store(db_path, read_only=True)
     try:
         payload = store.export_dict(host)
     finally:
@@ -29,9 +29,15 @@ def export_snapshot(db_path: str, out_path: str, host: str = None) -> str:  # ty
 
     directory = os.path.dirname(os.path.abspath(out_path))
     if directory and not os.path.isdir(directory):
-        os.makedirs(directory, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as fh:
+        os.makedirs(directory, mode=0o750, exist_ok=True)
+    # Snapshots contain the full topology; do not expose them world-readable.
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)
+    try:
+        os.chmod(out_path, 0o640)
+    except OSError:
+        pass
     return out_path
 
 

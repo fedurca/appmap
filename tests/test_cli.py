@@ -8,39 +8,42 @@ from commatrix import __main__ as cli
 class CollectGateTest(unittest.TestCase):
     def _args(self, **kw):
         ns = argparse.Namespace(
-            config=None,
+            config="/nonexistent/commatrix.conf",
             database=None,
             iterations=None,
             once=True,
             allow_manual=False,
+            require_root=False,
             verbose=False,
         )
         for k, v in kw.items():
             setattr(ns, k, v)
         return ns
 
-    def test_refuses_without_root(self):
-        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
-             mock.patch("commatrix.collector.run_loop") as run_loop:
-            rc = cli.cmd_collect(self._args())
-        self.assertEqual(rc, 1)
-        run_loop.assert_not_called()
-
     def test_refuses_when_not_under_systemd(self):
-        with mock.patch("commatrix.conntrack.is_root", return_value=True), \
+        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
              mock.patch("commatrix.conntrack.running_under_systemd", return_value=False), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
-            rc = cli.cmd_collect(self._args(allow_manual=False))
+            rc = cli.cmd_collect(self._args())
         self.assertEqual(rc, 0)
         run_loop.assert_not_called()
 
-    def test_runs_with_allow_manual_when_root(self):
-        with mock.patch("commatrix.conntrack.is_root", return_value=True), \
+    def test_runs_unprivileged_with_allow_manual(self):
+        # Root is NOT required by default; unprivileged run is allowed.
+        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
              mock.patch("commatrix.conntrack.running_under_systemd", return_value=False), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args(allow_manual=True))
         self.assertEqual(rc, 0)
         run_loop.assert_called_once()
+
+    def test_require_root_refuses_non_root(self):
+        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
+             mock.patch("commatrix.conntrack.running_under_systemd", return_value=True), \
+             mock.patch("commatrix.collector.run_loop") as run_loop:
+            rc = cli.cmd_collect(self._args(require_root=True))
+        self.assertEqual(rc, 1)
+        run_loop.assert_not_called()
 
     def test_runs_under_systemd(self):
         with mock.patch("commatrix.conntrack.is_root", return_value=True), \

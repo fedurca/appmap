@@ -217,6 +217,12 @@ def _enforce_disk(config: Config, store: Store, governor: rsrc.ResourceGovernor)
         removed = store.prune_older_than(cutoff)
         if removed:
             log.info("retention: pruned %d edges older than %.0f days", removed, config.retention_days)
+        removed_events = store.prune_events_older_than(cutoff)
+        if removed_events:
+            log.info(
+                "retention: pruned %d IR events older than %.0f days",
+                removed_events, config.retention_days,
+            )
 
     status = governor.disk_status(config.database, store.db_size_bytes())
     if status.over_budget:
@@ -273,7 +279,7 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
 
     collector = Collector(config)
     host = resolve_host(config)
-    store = Store(config.database)
+    store = Store(config.database, event_min_gap=config.event_min_gap_seconds)
     collector.refresh_host_params(store, host)
 
     governor = rsrc.ResourceGovernor(

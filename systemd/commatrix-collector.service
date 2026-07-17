@@ -6,14 +6,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Must run as root to read /proc/net/nf_conntrack and /proc/<pid>/fd, and to
-# toggle the nf_conntrack sysctls.
-User=root
-# Best-effort load of the connection tracking module (ignored if unavailable).
-# commatrix itself reads the sysctls' original values, enables them for the run
-# and restores them on stop, so we deliberately do NOT force them here (that
-# would hide the true pre-commatrix baseline from the restore logic).
-ExecStartPre=-/sbin/modprobe nf_conntrack
+# Runs UNPRIVILEGED by default. Instead of full root we grant only the two
+# capabilities the collector actually needs:
+#   * CAP_DAC_READ_SEARCH - read /proc/net/nf_conntrack and every /proc/<pid>/fd
+#                           (full process attribution across users)
+#   * CAP_NET_ADMIN       - toggle the nf_conntrack accounting/timestamp sysctls
+# The installer's --as-root flag switches this to User=root and drops the
+# capability lines for sites that prefer that.
+User=commatrix
+Group=commatrix
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_NET_ADMIN
+# Best-effort load of the connection tracking module (run as root via '+',
+# ignored via '-' if unavailable). commatrix itself reads the sysctls' original
+# values, enables them for the run and restores them on stop, so we deliberately
+# do NOT force the sysctl values here (that would hide the true pre-commatrix
+# baseline from the restore logic).
+ExecStartPre=-+/sbin/modprobe nf_conntrack
 ExecStart=/usr/bin/commatrix collect --config /etc/commatrix/commatrix.conf
 # Belt-and-braces restore in case the main process was killed (SIGKILL/OOM)
 # and never ran its own shutdown restore. No-op when already restored.
@@ -38,12 +47,18 @@ MemoryHigh=96M
 TasksMax=64
 
 # --- Light sandboxing (process still needs broad read access to /proc) ----
+# Compatible with AmbientCapabilities (systemd applies the ambient set before
+# exec and the kernel preserves it across no_new_privs). The '+'-prefixed
+# ExecStartPre above is unaffected by this and still runs as full root.
 NoNewPrivileges=true
 ProtectHome=true
 ProtectControlGroups=true
 ProtectKernelTunables=false
+UMask=0027
 RuntimeDirectory=commatrix
+RuntimeDirectoryMode=0750
 StateDirectory=commatrix
+StateDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

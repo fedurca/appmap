@@ -13,6 +13,8 @@
 #
 # Options:
 #   --user            install into $HOME (no root needed; capture still needs root)
+#   --as-root         run the system service as root (default: dedicated
+#                     unprivileged 'commatrix' user + CAP_DAC_READ_SEARCH/CAP_NET_ADMIN)
 #   --uninstall       remove a previous installation
 #   --no-start        install but do not enable/start the service
 #   --cpu-percent N   CPU budget as % of TOTAL compute (default 10)
@@ -26,8 +28,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_MODE=0
 UNINSTALL=0
 NO_START=0
+AS_ROOT=0
 CPU_PERCENT=10
 DISK_PERCENT=10
+RUN_USER="commatrix"
 
 log()  { printf '\033[1;32m[commatrix]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[commatrix]\033[0m %s\n' "$*" >&2; }
@@ -36,6 +40,7 @@ die()  { printf '\033[1;31m[commatrix]\033[0m %s\n' "$*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) USER_MODE=1 ;;
+    --as-root) AS_ROOT=1; RUN_USER="root" ;;
     --uninstall) UNINSTALL=1 ;;
     --no-start) NO_START=1 ;;
     --cpu-percent) CPU_PERCENT="${2:?}"; shift ;;
@@ -137,6 +142,20 @@ fi
 # the host's original values on stop (see commatrix restore-sysctls). This
 # keeps the machine's baseline untouched when commatrix is not running.
 
+# --- run user (system mode; unprivileged by default) --------------------
+if [ "$USER_MODE" -eq 0 ] && [ "$AS_ROOT" -eq 0 ]; then
+  if ! id "$RUN_USER" >/dev/null 2>&1; then
+    log "creating system user '$RUN_USER'"
+    useradd --system --no-create-home --shell /usr/sbin/nologin "$RUN_USER" 2>/dev/null \
+      || warn "could not create user '$RUN_USER' (create it manually if needed)"
+  fi
+  # The unprivileged service must own its state/snapshot dirs to write them.
+  chown -R "$RUN_USER" "$STATEDIR" 2>/dev/null || true
+  chmod 0750 "$STATEDIR" 2>/dev/null || true
+elif [ "$USER_MODE" -eq 0 ]; then
+  log "service will run as root (--as-root)"
+fi
+
 # --- systemd unit + resource drop-in ------------------------------------
 CORES="$(nproc 2>/dev/null || echo 1)"
 TOTAL_QUOTA=$(( CPU_PERCENT * CORES ))   # 10% of total compute across all cores
@@ -159,19 +178,34 @@ install_unit() {
     "$src" > "$dst"
 
   if [ "$USER_MODE" -eq 1 ]; then
-    # User services can't set sysctls, run as root, or use system protections.
+    # User services can't set sysctls, capabilities, users, or system protections.
     sed -i \
       -e '/^ExecStartPre=/d' \
       -e '/^ExecStopPost=/d' \
       -e '/^User=/d' \
+      -e '/^Group=/d' \
+      -e '/^AmbientCapabilities=/d' \
+      -e '/^CapabilityBoundingSet=/d' \
+      -e '/^NoNewPrivileges=/d' \
       -e '/^ProtectHome=/d' \
       -e '/^ProtectControlGroups=/d' \
       -e '/^ProtectKernelTunables=/d' \
+      -e '/^UMask=/d' \
       -e '/^StateDirectory=/d' \
+      -e '/^StateDirectoryMode=/d' \
       -e '/^RuntimeDirectory=/d' \
+      -e '/^RuntimeDirectoryMode=/d' \
       -e '/^\[Install\]/,$d' \
       "$dst"
     printf '\n[Install]\nWantedBy=default.target\n' >> "$dst"
+  elif [ "$AS_ROOT" -eq 1 ]; then
+    # Run as root: no capabilities/Group needed (root already has them).
+    sed -i \
+      -e 's#^User=.*#User=root#' \
+      -e '/^Group=/d' \
+      -e '/^AmbientCapabilities=/d' \
+      -e '/^CapabilityBoundingSet=/d' \
+      "$dst"
   fi
 
   # Resource drop-in: 10% of TOTAL compute + memory ceiling.

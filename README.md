@@ -243,7 +243,25 @@ flowchart LR
   (use the `conntrack-events` source or a lower `poll_interval` to reduce this).
 - Byte counts are a best-effort cumulative estimate, not exact accounting, and
   require `nf_conntrack_acct=1`.
-- Requires root on collectors.
+- Runs **unprivileged by default**: topology is always captured, but toggling
+  the `nf_conntrack` sysctls and attributing *other users'* processes need
+  `CAP_NET_ADMIN` / `CAP_DAC_READ_SEARCH` (the systemd unit grants exactly
+  these) or root (`install.sh --as-root`, or `require_root`/`--require-root`).
+
+## Incident-response history
+
+Every collect run also writes an **append-only event log** (`flow_events`):
+one row when an edge is first seen (`new`) and one when it becomes active again
+after being idle (`reactivated`, threshold `event_min_gap_seconds`). This gives
+a forensic timeline of "when did host X first talk to Y":
+
+```bash
+commatrix history --database /var/lib/commatrix/commatrix.db            # markdown
+commatrix history -f jsonl --since-seconds 3600 --kind new              # for SIEM
+```
+
+The database and exported snapshots are created `0640` (dir `0750`) so the
+network map is not world-readable.
 
 ## License
 

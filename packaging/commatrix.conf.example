@@ -11,6 +11,15 @@ database = /var/lib/commatrix/commatrix.db
 source = auto
 # Optional explicit hostname (otherwise taken from the Zabbix agent / OS).
 # hostname = web01.example.com
+# Where pre-run nf_conntrack sysctl values are saved so they can be restored
+# after an unclean exit (systemd RuntimeDirectory).
+# sysctl_state_file = /run/commatrix/sysctl.state
+# Hard-require root. Off by default: commatrix runs unprivileged (the systemd
+# unit grants CAP_DAC_READ_SEARCH/CAP_NET_ADMIN instead of full root).
+require_root = false
+# Append-only IR history: log a "reactivated" event when an edge resumes
+# activity after being idle at least this many seconds (0 = only new edges).
+event_min_gap_seconds = 60
 
 [network]
 # CIDRs considered "internal". Peers outside these are "external".
