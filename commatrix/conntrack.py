@@ -20,13 +20,17 @@ For byte/packet accounting the kernel must have accounting enabled::
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
 from .sockets import SocketEntry, read_all_sockets
+
+log = logging.getLogger("commatrix.conntrack")
 
 PROC_CONNTRACK = "/proc/net/nf_conntrack"
 
@@ -45,6 +49,14 @@ _L4_PROTOS = {
 
 _ACCT_SYSCTL = "/proc/sys/net/netfilter/nf_conntrack_acct"
 _TIMESTAMP_SYSCTL = "/proc/sys/net/netfilter/nf_conntrack_timestamp"
+
+# nf_conntrack sysctls commatrix turns on for a run and restores afterwards.
+MANAGED_SYSCTLS: Sequence[str] = (_ACCT_SYSCTL, _TIMESTAMP_SYSCTL)
+
+# Where the pre-run sysctl values are persisted so they can be restored even
+# after an unclean exit (SIGKILL / OOM / power loss) by a later run or by the
+# systemd ``ExecStopPost`` hook. Lives under the unit's RuntimeDirectory.
+DEFAULT_SYSCTL_STATE_FILE = "/run/commatrix/sysctl.state"
 
 
 @dataclass
@@ -134,45 +146,131 @@ def write_sysctl_flag(path: str, enabled: bool) -> bool:
         return False
 
 
-class AccountingGuard:
-    """Enable nf_conntrack byte/packet accounting for the lifetime of a run.
+def _remove_file(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
-    On entry the current ``nf_conntrack_acct`` state is read and, if disabled,
-    accounting is turned on.  On exit the original state is restored (so a host
-    that had accounting off is left exactly as it was found).  When the sysctl
-    is unavailable or not writable (e.g. not root, or ``nf_conntrack`` absent),
-    the guard degrades to a no-op and records that fact for the caller to log.
+
+class SysctlGuard:
+    """Enable a set of nf_conntrack sysctls for a run and restore them after.
+
+    On :meth:`apply` the current value of each managed sysctl is read and
+    persisted to *state_file*, then every writable sysctl that was disabled is
+    turned on.  :meth:`restore` puts each changed sysctl back to the value it
+    had on entry and removes the state file.
+
+    Because the originals are persisted to disk *before* anything is changed,
+    the host can be returned to its original state even if this process is
+    ``SIGKILL``ed and never runs :meth:`restore`: a later run recovers the
+    stale state on startup (see :meth:`apply`), and the systemd
+    ``ExecStopPost`` hook can call :meth:`restore_from_file` directly.
+
+    The guard degrades gracefully: sysctls that cannot be read (``nf_conntrack``
+    not loaded) are recorded in :attr:`unavailable`; sysctls that exist but
+    cannot be written (not root) set :attr:`enable_failed`.
     """
 
-    def __init__(self, sysctl: str = _ACCT_SYSCTL):
-        self.sysctl = sysctl
-        self.original: Optional[bool] = None
-        self.changed = False
+    def __init__(
+        self,
+        sysctls: Sequence[str] = MANAGED_SYSCTLS,
+        state_file: str = DEFAULT_SYSCTL_STATE_FILE,
+    ):
+        self.sysctls = list(sysctls)
+        self.state_file = state_file
+        self.originals: Dict[str, bool] = {}
+        # path -> original value we still owe a restore to.
+        self.changed: Dict[str, bool] = {}
+        self.unavailable: List[str] = []
         self.enable_failed = False
+        self.recovered_stale = False
 
     @property
     def available(self) -> bool:
-        return self.original is not None
+        return bool(self.originals)
 
-    def __enter__(self) -> "AccountingGuard":
-        self.original = read_sysctl_flag(self.sysctl)
-        if self.original is False:
-            if write_sysctl_flag(self.sysctl, True):
-                self.changed = True
+    def apply(self) -> "SysctlGuard":
+        # Recover a leftover state file from a previous unclean exit first, so
+        # the "original" we capture below is the true pre-commatrix baseline.
+        if os.path.exists(self.state_file):
+            self.recovered_stale = self.restore_from_file(self.state_file)
+
+        for path in self.sysctls:
+            value = read_sysctl_flag(path)
+            if value is None:
+                self.unavailable.append(path)
             else:
-                self.enable_failed = True
+                self.originals[path] = value
+
+        # Persist the baseline before mutating anything.
+        if self.originals:
+            self._write_state(self.originals)
+
+        for path, original in self.originals.items():
+            if original is False:
+                if write_sysctl_flag(path, True):
+                    self.changed[path] = original
+                else:
+                    self.enable_failed = True
         return self
 
     def restore(self) -> None:
-        """Restore the sysctl to the value observed on entry (idempotent)."""
+        """Restore changed sysctls to their original values (idempotent)."""
 
-        if self.changed and self.original is not None:
-            if write_sysctl_flag(self.sysctl, self.original):
-                self.changed = False
+        for path in list(self.changed):
+            if write_sysctl_flag(path, self.changed[path]):
+                del self.changed[path]
+        if not self.changed:
+            _remove_file(self.state_file)
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        self.restore()
-        return False
+    def _write_state(self, originals: Dict[str, bool]) -> None:
+        payload = {path: ("1" if val else "0") for path, val in originals.items()}
+        try:
+            parent = os.path.dirname(self.state_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(self.state_file, "w", encoding="ascii") as fh:
+                json.dump(payload, fh)
+        except OSError as exc:
+            log.debug("could not persist sysctl state to %s: %s", self.state_file, exc)
+
+    @staticmethod
+    def restore_from_file(state_file: str) -> bool:
+        """Restore sysctls from a persisted state file, then remove it.
+
+        Returns True if at least one sysctl was changed back.  Safe to call
+        when the file is absent (returns False).  Used for crash recovery and
+        by the systemd ExecStopPost hook.
+        """
+
+        try:
+            with open(state_file, "r", encoding="ascii") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        restored = False
+        for path, raw in data.items():
+            desired = str(raw).strip() == "1"
+            current = read_sysctl_flag(path)
+            if current is None or current == desired:
+                continue
+            if write_sysctl_flag(path, desired):
+                restored = True
+        _remove_file(state_file)
+        return restored
+
+
+def running_under_systemd() -> bool:
+    """Return True when the process was started by systemd.
+
+    systemd sets a unique ``INVOCATION_ID`` in the environment of every unit
+    it starts (both system and user units), which is the documented way to
+    detect a systemd-managed invocation.
+    """
+
+    return bool(os.environ.get("INVOCATION_ID"))
 
 
 def _to_int(value: Optional[str]) -> Optional[int]:

@@ -10,6 +10,8 @@ Subcommands:
 * ``report``      -- generate matrix / catalog / diagram / security outputs.
 * ``hostparams``  -- print resolved Zabbix host parameters (debug / UserParameter).
 * ``diff``        -- drift report between two JSON snapshots.
+* ``restore-sysctls`` -- restore nf_conntrack sysctls from the persisted state
+  file (used by the systemd ExecStopPost hook / crash recovery).
 """
 
 from __future__ import annotations
@@ -47,12 +49,48 @@ def _write_output(text: str, output: Optional[str]) -> None:
 
 def cmd_collect(args: argparse.Namespace) -> int:
     from .collector import run_loop
+    from .conntrack import is_root, running_under_systemd
+
+    log = logging.getLogger("commatrix")
+
+    # The collector mutates kernel sysctls and reads other processes'
+    # /proc/<pid>/fd, so it must run as root.
+    if not is_root():
+        log.warning("commatrix collect must run as root; refusing to start")
+        return 1
+
+    # By design commatrix is run as a systemd service (which also enforces the
+    # CPU/memory limits and restores sysctls via ExecStopPost). Refuse to run
+    # otherwise unless explicitly overridden for labs/testing.
+    if not running_under_systemd() and not args.allow_manual:
+        log.warning(
+            "commatrix collect is intended to run as a systemd service; not "
+            "started by systemd (no INVOCATION_ID) and --allow-manual not given "
+            "- doing nothing"
+        )
+        return 0
 
     config = load_config(args.config)
     if args.database:
         config.database = args.database
     iterations = 1 if args.once else args.iterations
     run_loop(config, iterations=iterations)
+    return 0
+
+
+def cmd_restore_sysctls(args: argparse.Namespace) -> int:
+    from .conntrack import DEFAULT_SYSCTL_STATE_FILE, SysctlGuard
+
+    config = load_config(args.config)
+    state_file = args.state_file or getattr(
+        config, "sysctl_state_file", DEFAULT_SYSCTL_STATE_FILE
+    )
+    restored = SysctlGuard.restore_from_file(state_file)
+    log = logging.getLogger("commatrix")
+    if restored:
+        log.info("restored nf_conntrack sysctls from %s", state_file)
+    else:
+        log.debug("no nf_conntrack sysctls to restore (%s)", state_file)
     return 0
 
 
@@ -203,7 +241,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument("--database", help="override database path")
     p_collect.add_argument("--iterations", type=int, default=None, help="stop after N polls")
     p_collect.add_argument("--once", action="store_true", help="run a single poll and exit")
+    p_collect.add_argument(
+        "--allow-manual",
+        action="store_true",
+        help="allow running outside systemd (labs/testing); still requires root",
+    )
     p_collect.set_defaults(func=cmd_collect)
+
+    p_restore = sub.add_parser(
+        "restore-sysctls",
+        help="restore nf_conntrack sysctls from the persisted state file (ExecStopPost)",
+    )
+    _add_common(p_restore)
+    p_restore.add_argument(
+        "--state-file", help="path to the persisted sysctl state file"
+    )
+    p_restore.set_defaults(func=cmd_restore_sysctls)
 
     p_export = sub.add_parser("export", help="export a JSON snapshot")
     _add_common(p_export)

@@ -57,6 +57,9 @@ class Config:
     database: str = "/var/lib/commatrix/commatrix.db"
     source: str = "auto"  # auto | procfs | conntrack-events | sockets
     hostname: Optional[str] = None  # override; otherwise derived from zabbix/os
+    # Where pre-run nf_conntrack sysctl values are persisted so they can be
+    # restored after an unclean exit (see conntrack.SysctlGuard).
+    sysctl_state_file: str = "/run/commatrix/sysctl.state"
 
     # [network]
     internal_cidrs: List[str] = field(default_factory=lambda: list(DEFAULT_INTERNAL_CIDRS))
@@ -133,6 +136,7 @@ def load_config(path: Optional[str] = None) -> Config:
         cfg.database = sec.get("database", cfg.database)
         cfg.source = sec.get("source", cfg.source)
         cfg.hostname = sec.get("hostname", cfg.hostname)
+        cfg.sysctl_state_file = sec.get("sysctl_state_file", cfg.sysctl_state_file)
 
     if parser.has_section("network"):
         sec = parser["network"]

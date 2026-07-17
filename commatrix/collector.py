@@ -4,7 +4,9 @@ signatures together, then persist aggregated edges to the store.
 
 from __future__ import annotations
 
+import atexit
 import logging
+import signal
 import socket as _socket
 import time
 from dataclasses import dataclass
@@ -234,6 +236,33 @@ def _enforce_disk(config: Config, store: Store, governor: rsrc.ResourceGovernor)
     return False
 
 
+def _install_restore_handlers(guard: "ct.SysctlGuard") -> None:
+    """Ensure sysctls are restored on SIGTERM/SIGHUP and at interpreter exit.
+
+    SIGINT already raises KeyboardInterrupt (handled by the loop's finally).
+    systemd's ``systemctl stop`` sends SIGTERM, which by default terminates the
+    process without running ``finally`` blocks; we convert it (and SIGHUP) into
+    KeyboardInterrupt so the normal shutdown/restore path runs.  ``atexit`` is a
+    last-resort belt-and-braces (it does not run on SIGKILL / power loss, which
+    is why the state file also enables recovery on the next start).
+    """
+
+    def _raise_interrupt(signum, _frame):
+        raise KeyboardInterrupt
+
+    for signame in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, signame, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _raise_interrupt)
+        except (ValueError, OSError):
+            # Not in the main thread (e.g. under a test harness); skip.
+            pass
+
+    atexit.register(guard.restore)
+
+
 def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     """Run the collection loop.  ``iterations=None`` runs forever.
 
@@ -255,27 +284,35 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     )
     rsrc.lower_priority()
 
-    # Turn on byte/packet accounting for the duration of the run and restore the
-    # host's original setting on exit (see AccountingGuard).
-    accounting = ct.AccountingGuard()
-    accounting.__enter__()
-    if not accounting.available:
+    # Turn on byte/packet accounting + flow timestamps for the duration of the
+    # run and restore the host's original settings on exit (see SysctlGuard).
+    accounting = ct.SysctlGuard(state_file=config.sysctl_state_file)
+    accounting.apply()
+    _install_restore_handlers(accounting)
+
+    if accounting.recovered_stale:
         log.info(
-            "nf_conntrack accounting sysctl unavailable (%s); leaving it untouched",
-            accounting.sysctl,
+            "recovered nf_conntrack sysctls from a previous unclean shutdown (%s)",
+            config.sysctl_state_file,
         )
-    elif accounting.changed:
-        log.info(
-            "enabled nf_conntrack byte/packet accounting for this run "
-            "(was disabled; will restore on exit)"
+    if not accounting.available:
+        log.warning(
+            "nf_conntrack sysctls unavailable (%s); the module is likely not "
+            "loaded (try: modprobe nf_conntrack). Byte/packet counts will be zero",
+            ", ".join(accounting.unavailable) or "none readable",
         )
     elif accounting.enable_failed:
         log.warning(
-            "could not enable nf_conntrack accounting (root required?); "
-            "byte/packet counts may be zero"
+            "could not enable nf_conntrack sysctls despite them being present; "
+            "root privileges are required to write them"
+        )
+    elif accounting.changed:
+        log.info(
+            "enabled nf_conntrack sysctls for this run (%s; will restore on exit)",
+            ", ".join(sorted(accounting.changed)),
         )
     else:
-        log.debug("nf_conntrack accounting already enabled; leaving as-is")
+        log.debug("nf_conntrack sysctls already enabled; leaving as-is")
 
     count = 0
     backend = ct.capture_backend(config.source)
@@ -338,9 +375,8 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
             accounting.restore()
             if accounting.changed:
                 log.warning(
-                    "failed to restore nf_conntrack accounting to its original state"
+                    "failed to restore nf_conntrack sysctls (%s) to their original state",
+                    ", ".join(sorted(accounting.changed)),
                 )
             else:
-                log.info(
-                    "restored nf_conntrack byte/packet accounting to its original (disabled) state"
-                )
+                log.info("restored nf_conntrack sysctls to their original state")

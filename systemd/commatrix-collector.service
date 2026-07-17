@@ -6,11 +6,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Must run as root to read /proc/net/nf_conntrack and /proc/<pid>/fd.
+# Must run as root to read /proc/net/nf_conntrack and /proc/<pid>/fd, and to
+# toggle the nf_conntrack sysctls.
 User=root
-ExecStartPre=/sbin/sysctl -w net.netfilter.nf_conntrack_acct=1
-ExecStartPre=/sbin/sysctl -w net.netfilter.nf_conntrack_timestamp=1
+# Best-effort load of the connection tracking module (ignored if unavailable).
+# commatrix itself reads the sysctls' original values, enables them for the run
+# and restores them on stop, so we deliberately do NOT force them here (that
+# would hide the true pre-commatrix baseline from the restore logic).
+ExecStartPre=-/sbin/modprobe nf_conntrack
 ExecStart=/usr/bin/commatrix collect --config /etc/commatrix/commatrix.conf
+# Belt-and-braces restore in case the main process was killed (SIGKILL/OOM)
+# and never ran its own shutdown restore. No-op when already restored.
+ExecStopPost=/usr/bin/commatrix restore-sysctls --config /etc/commatrix/commatrix.conf
 Restart=on-failure
 RestartSec=5
 

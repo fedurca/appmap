@@ -131,17 +131,11 @@ else
   warn "config already exists at $CONF (left unchanged)"
 fi
 
-# --- sysctls (system mode only) -----------------------------------------
-if [ "$USER_MODE" -eq 0 ]; then
-  log "enabling nf_conntrack accounting + timestamps (sysctl)"
-  cat > /etc/sysctl.d/99-commatrix-conntrack.conf <<'EOF'
-# Required by commatrix for byte/packet accounting and flow timestamps.
-net.netfilter.nf_conntrack_acct = 1
-net.netfilter.nf_conntrack_timestamp = 1
-EOF
-  sysctl -p /etc/sysctl.d/99-commatrix-conntrack.conf >/dev/null 2>&1 || \
-    warn "could not apply sysctls now (nf_conntrack module may load later)"
-fi
+# --- sysctls -------------------------------------------------------------
+# Intentionally NOT written as a persistent /etc/sysctl.d drop-in: the service
+# enables nf_conntrack accounting/timestamps only while it runs and restores
+# the host's original values on stop (see commatrix restore-sysctls). This
+# keeps the machine's baseline untouched when commatrix is not running.
 
 # --- systemd unit + resource drop-in ------------------------------------
 CORES="$(nproc 2>/dev/null || echo 1)"
@@ -158,15 +152,17 @@ install_unit() {
   local dst="$UNITDIR/commatrix-collector.service"
   log "installing systemd unit -> $dst"
   mkdir -p "$UNITDIR"
-  # Rewrite ExecStart to use the installed wrapper and config.
+  # Rewrite ExecStart/ExecStopPost to use the installed wrapper and config.
   sed \
     -e "s#^ExecStart=.*#ExecStart=$WRAPPER collect --config $CONF#" \
+    -e "s#^ExecStopPost=.*#ExecStopPost=$WRAPPER restore-sysctls --config $CONF#" \
     "$src" > "$dst"
 
   if [ "$USER_MODE" -eq 1 ]; then
     # User services can't set sysctls, run as root, or use system protections.
     sed -i \
       -e '/^ExecStartPre=/d' \
+      -e '/^ExecStopPost=/d' \
       -e '/^User=/d' \
       -e '/^ProtectHome=/d' \
       -e '/^ProtectControlGroups=/d' \

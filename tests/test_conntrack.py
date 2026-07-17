@@ -114,40 +114,86 @@ class SysctlFlagTest(unittest.TestCase):
         self.assertFalse(ct.write_sysctl_flag("/proc/does/not/exist", True))
 
 
-class AccountingGuardTest(unittest.TestCase):
-    def _tmp_flag(self, value):
-        fd, path = tempfile.mkstemp()
-        with os.fdopen(fd, "w") as fh:
+class SysctlGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, ignore_errors=True))
+        self.state = os.path.join(self.dir, "sysctl.state")
+
+    def _flag(self, name, value):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
             fh.write(value)
-        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
         return path
 
     def test_enables_then_restores_when_originally_off(self):
-        path = self._tmp_flag("0\n")
-        guard = ct.AccountingGuard(sysctl=path)
-        with guard:
-            self.assertTrue(guard.available)
-            self.assertTrue(guard.changed)
-            self.assertIs(ct.read_sysctl_flag(path), True)
-        # restored to original disabled state
-        self.assertIs(ct.read_sysctl_flag(path), False)
+        acct = self._flag("acct", "0\n")
+        ts = self._flag("ts", "0\n")
+        guard = ct.SysctlGuard(sysctls=[acct, ts], state_file=self.state)
+        guard.apply()
+        self.assertTrue(guard.available)
+        self.assertEqual(set(guard.changed), {acct, ts})
+        self.assertIs(ct.read_sysctl_flag(acct), True)
+        self.assertIs(ct.read_sysctl_flag(ts), True)
+        self.assertTrue(os.path.exists(self.state))
+        guard.restore()
+        self.assertIs(ct.read_sysctl_flag(acct), False)
+        self.assertIs(ct.read_sysctl_flag(ts), False)
         self.assertFalse(guard.changed)
+        self.assertFalse(os.path.exists(self.state))
 
     def test_leaves_enabled_untouched(self):
-        path = self._tmp_flag("1\n")
-        guard = ct.AccountingGuard(sysctl=path)
-        with guard:
-            self.assertFalse(guard.changed)
-            self.assertIs(ct.read_sysctl_flag(path), True)
-        # still enabled, and never marked as changed -> not restored to off
-        self.assertIs(ct.read_sysctl_flag(path), True)
+        acct = self._flag("acct", "1\n")
+        guard = ct.SysctlGuard(sysctls=[acct], state_file=self.state)
+        guard.apply()
+        self.assertFalse(guard.changed)
+        self.assertIs(ct.read_sysctl_flag(acct), True)
+        guard.restore()
+        self.assertIs(ct.read_sysctl_flag(acct), True)
 
     def test_unavailable_sysctl_is_noop(self):
-        guard = ct.AccountingGuard(sysctl="/nonexistent/sysctl/flag")
-        with guard:
-            self.assertFalse(guard.available)
-            self.assertFalse(guard.changed)
+        missing = os.path.join(self.dir, "nope")
+        guard = ct.SysctlGuard(sysctls=[missing], state_file=self.state)
+        guard.apply()
+        self.assertFalse(guard.available)
+        self.assertIn(missing, guard.unavailable)
         self.assertFalse(guard.enable_failed)
+
+    def test_restore_from_file_recovers_state(self):
+        acct = self._flag("acct", "1\n")  # currently on, but baseline was off
+        with open(self.state, "w") as fh:
+            fh.write(f'{{"{acct}": "0"}}')
+        restored = ct.SysctlGuard.restore_from_file(self.state)
+        self.assertTrue(restored)
+        self.assertIs(ct.read_sysctl_flag(acct), False)
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_restore_from_missing_file_is_false(self):
+        self.assertFalse(ct.SysctlGuard.restore_from_file(self.state))
+
+    def test_apply_recovers_stale_state_first(self):
+        acct = self._flag("acct", "1\n")  # left ON by a crashed run
+        with open(self.state, "w") as fh:
+            fh.write(f'{{"{acct}": "0"}}')  # crashed run recorded baseline OFF
+        guard = ct.SysctlGuard(sysctls=[acct], state_file=self.state)
+        guard.apply()
+        self.assertTrue(guard.recovered_stale)
+        # baseline recovered to OFF, then re-enabled for this run
+        self.assertEqual(guard.originals.get(acct), False)
+        self.assertIs(ct.read_sysctl_flag(acct), True)
+        guard.restore()
+        self.assertIs(ct.read_sysctl_flag(acct), False)
+
+
+class SystemdDetectionTest(unittest.TestCase):
+    def test_running_under_systemd_true(self):
+        with mock.patch.dict(os.environ, {"INVOCATION_ID": "abc123"}):
+            self.assertTrue(ct.running_under_systemd())
+
+    def test_running_under_systemd_false(self):
+        env = {k: v for k, v in os.environ.items() if k != "INVOCATION_ID"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertFalse(ct.running_under_systemd())
 
 
 if __name__ == "__main__":
