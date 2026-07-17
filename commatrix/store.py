@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Restrictive permissions: the database is a full internal network map and must
 # not be world-readable.
@@ -119,6 +119,20 @@ CREATE TABLE IF NOT EXISTS dns_events (
 CREATE INDEX IF NOT EXISTS idx_dns_ts ON dns_events (ts);
 CREATE INDEX IF NOT EXISTS idx_dns_host ON dns_events (host, ts);
 CREATE INDEX IF NOT EXISTS idx_dns_qname ON dns_events (qname);
+
+-- Collector run/uptime ledger: one row per collection session. Enables
+-- first-seen, number of runs, total runtime and coverage-gap ("blind spot")
+-- statistics. ``last_seen`` is a heartbeat so an unclean exit still bounds the
+-- session length; ``stopped`` is set on clean shutdown.
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY,
+    host TEXT,
+    started REAL NOT NULL,
+    last_seen REAL,
+    stopped REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs (started);
 """
 
 
@@ -492,6 +506,73 @@ class Store:
         cur = self.conn.execute("DELETE FROM dns_events WHERE ts < ?", (cutoff_ts,))
         self.conn.commit()
         return cur.rowcount
+
+    # -- run / uptime ledger --------------------------------------------
+    def start_run(self, host: str, now: Optional[float] = None) -> int:
+        now = now if now is not None else time.time()
+        cur = self.conn.execute(
+            "INSERT INTO runs (host, started, last_seen) VALUES (?, ?, ?)",
+            (host, now, now),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def heartbeat_run(self, run_id: int, now: Optional[float] = None) -> None:
+        now = now if now is not None else time.time()
+        self.conn.execute("UPDATE runs SET last_seen=? WHERE id=?", (now, run_id))
+        self.conn.commit()
+
+    def finish_run(self, run_id: int, now: Optional[float] = None) -> None:
+        now = now if now is not None else time.time()
+        self.conn.execute(
+            "UPDATE runs SET last_seen=?, stopped=? WHERE id=?", (now, now, run_id)
+        )
+        self.conn.commit()
+
+    def run_stats(self, host: Optional[str] = None, now: Optional[float] = None) -> Dict[str, object]:
+        """Aggregate collector uptime into coverage statistics.
+
+        Returns first-run time, number of runs, total runtime (seconds), the
+        wall-clock span since first run, and the "blind spot" percentage: the
+        share of that span during which the collector was NOT running.
+        """
+
+        now = now if now is not None else time.time()
+        q = "SELECT started, last_seen, stopped FROM runs"
+        params: List[object] = []
+        if host:
+            q += " WHERE host=?"
+            params.append(host)
+        rows = list(self.conn.execute(q, params))
+        rows = [r for r in rows if r["started"] is not None]
+        if not rows:
+            return {
+                "first_run": None, "run_count": 0, "total_runtime": 0.0,
+                "span": 0.0, "blind_spot_pct": 0.0,
+            }
+
+        first = min(r["started"] for r in rows)
+        total = 0.0
+        for r in rows:
+            start = r["started"]
+            end = r["stopped"] if r["stopped"] is not None else r["last_seen"]
+            if end is None:
+                end = start
+            total += max(0.0, end - start)
+
+        span = max(0.0, now - first)
+        if span > 0:
+            total = min(total, span)  # sessions cannot exceed wall clock
+            blind_pct = max(0.0, (span - total) / span * 100.0)
+        else:
+            blind_pct = 0.0
+        return {
+            "first_run": first,
+            "run_count": len(rows),
+            "total_runtime": total,
+            "span": span,
+            "blind_spot_pct": blind_pct,
+        }
 
     def record_edges(self, host: str, edges: Iterable[EdgeObservation], now: Optional[float] = None) -> int:
         if now is None:

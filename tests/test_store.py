@@ -124,6 +124,43 @@ class StoreDnsEventsTest(unittest.TestCase):
         s.close()
 
 
+class StoreRunStatsTest(unittest.TestCase):
+    def _store(self):
+        return Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+
+    def test_coverage_gap(self):
+        s = self._store()
+        r1 = s.start_run("h", now=0.0)
+        s.finish_run(r1, now=100.0)      # ran 0..100
+        r2 = s.start_run("h", now=300.0)
+        s.finish_run(r2, now=400.0)      # ran 300..400
+        st = s.run_stats("h", now=400.0)
+        self.assertEqual(st["run_count"], 2)
+        self.assertEqual(st["first_run"], 0.0)
+        self.assertAlmostEqual(st["total_runtime"], 200.0)
+        self.assertAlmostEqual(st["span"], 400.0)
+        self.assertAlmostEqual(st["blind_spot_pct"], 50.0)
+        s.close()
+
+    def test_active_run_uses_heartbeat(self):
+        s = self._store()
+        r = s.start_run("h", now=0.0)
+        s.heartbeat_run(r, now=50.0)     # still running, last heartbeat at 50
+        st = s.run_stats("h", now=100.0)
+        self.assertEqual(st["run_count"], 1)
+        self.assertAlmostEqual(st["total_runtime"], 50.0)
+        self.assertAlmostEqual(st["blind_spot_pct"], 50.0)
+        s.close()
+
+    def test_empty(self):
+        s = self._store()
+        st = s.run_stats(now=100.0)
+        self.assertEqual(st["run_count"], 0)
+        self.assertIsNone(st["first_run"])
+        self.assertEqual(st["blind_spot_pct"], 0.0)
+        s.close()
+
+
 class StorePermissionsTest(unittest.TestCase):
     def test_db_created_not_world_readable(self):
         tmp = tempfile.mkdtemp()

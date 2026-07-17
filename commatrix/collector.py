@@ -307,6 +307,7 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     host = resolve_host(config)
     store = Store(config.database, event_min_gap=config.event_min_gap_seconds)
     collector.refresh_host_params(store, host)
+    run_id = store.start_run(host)
 
     governor = rsrc.ResourceGovernor(
         cpu_budget=config.cpu_budget,
@@ -408,6 +409,7 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
             except (PermissionError, FileNotFoundError):
                 break
 
+            store.heartbeat_run(run_id, now=start)
             if count % 60 == 0 and count > 0:
                 collector.refresh_host_params(store, host)
             count += 1
@@ -426,6 +428,7 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     finally:
         if dns_monitor is not None:
             dns_monitor.stop()
+        store.finish_run(run_id)
         if config.html_report:
             from . import report as rp
 

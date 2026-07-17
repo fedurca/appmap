@@ -430,6 +430,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     direction_items = _top_items(_sum_by(rows, "direction"), limit=6)
     total_bytes = sum(float(r.get("bytes") or 0) for r in rows)
     total_flows = len(rows)
+    stats = store.run_stats(host)
 
     # Explain missing volume instead of silently showing 0 B everywhere.
     no_acct = len(security["no_accounting"])
@@ -545,6 +546,10 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
       <div class="card"><div>Total traffic</div><div class="metric">{html.escape(human_bytes(total_bytes))}</div></div>
       <div class="card"><div>Hosts</div><div class="metric">{len(store.list_hosts())}</div></div>
       <div class="card"><div>Security findings</div><div class="metric">{len(security['external_inbound']) + len(security['cleartext_external'])}</div></div>
+      <div class="card"><div>First run</div><div class="metric" style="font-size:1.1rem">{html.escape(fmt_time(stats['first_run']))}</div></div>
+      <div class="card"><div>Runs</div><div class="metric">{stats['run_count']}</div></div>
+      <div class="card"><div>Total runtime</div><div class="metric" style="font-size:1.2rem">{html.escape(fmt_duration(stats['total_runtime']))}</div></div>
+      <div class="card"><div>Coverage gap</div><div class="metric" style="color:{'#f87171' if stats['blind_spot_pct'] >= 20 else '#4ade80'}">{stats['blind_spot_pct']:.1f}%</div><div style="color:#94a3b8;font-size:.8rem">time not collecting since first run</div></div>
     </section>
     {doh_top}
     {banner}
