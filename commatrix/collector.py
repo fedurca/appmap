@@ -18,6 +18,7 @@ from . import dns as dnsmod
 from . import dohcheck
 from . import dohdetect
 from . import netns as netnsmod
+from . import platform as _platform
 from . import resources as rsrc
 from . import sni as snimod
 from . import timecheck
@@ -212,6 +213,10 @@ class Collector:
         return edges
 
     def build_edges(self, entries: List[ct.ConntrackEntry]) -> List[EdgeObservation]:
+        if _platform.IS_WINDOWS:
+            from .platform.win import capture as wincap
+            return wincap.build_edges(self)
+
         # Host namespace from the passed entries (event/poll snapshot).
         edges = self._edges_from(entries, read_all_sockets(), "host")
 
@@ -257,16 +262,23 @@ class Collector:
             zabbix_get_bin=self.config.zabbix_get,
             hostname_override=self.config.hostname,
         )
-        # Enrich with the host's DoH posture (disabled/enforced?).
-        try:
-            params.update(dohcheck.host_params())
-        except Exception as exc:  # noqa: BLE001 - posture is best-effort
-            log.debug("DoH posture check failed: %s", exc)
-        # Enrich with time-sync posture / clock offset (our stats rely on it).
-        try:
-            params.update(timecheck.host_params(self.config.ntp_check_server))
-        except Exception as exc:  # noqa: BLE001 - posture is best-effort
-            log.debug("time posture check failed: %s", exc)
+        # Enrich with DoH + time posture (platform-specific sources).
+        if _platform.IS_WINDOWS:
+            try:
+                from .platform.win import windoh, wintime
+                params.update(windoh.host_params())
+                params.update(wintime.host_params(self.config.ntp_check_server))
+            except Exception as exc:  # noqa: BLE001 - posture is best-effort
+                log.debug("windows posture check failed: %s", exc)
+        else:
+            try:
+                params.update(dohcheck.host_params())
+            except Exception as exc:  # noqa: BLE001 - posture is best-effort
+                log.debug("DoH posture check failed: %s", exc)
+            try:
+                params.update(timecheck.host_params(self.config.ntp_check_server))
+            except Exception as exc:  # noqa: BLE001 - posture is best-effort
+                log.debug("time posture check failed: %s", exc)
         # Explicit per-host data-quality indicator so SOC knows where byte counts
         # are trustworthy vs topology-only.
         try:
@@ -361,6 +373,11 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     database exceed ``disk_budget`` of free space.
     """
 
+    if _platform.IS_WINDOWS:
+        # Windows has a dedicated loop (IP Helper/ESTATS/ETW, Job Object, ACLs).
+        from .platform.win import runloop as winrunloop
+        return winrunloop.run(config, iterations=iterations)
+
     collector = Collector(config)
     host = resolve_host(config)
     store = Store(config.database, event_min_gap=config.event_min_gap_seconds)
@@ -388,7 +405,7 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
         min_free_disk=config.min_free_disk,
         min_interval=max(1.0, config.poll_interval),
     )
-    rsrc.lower_priority()
+    _platform.lower_priority()
 
     # Turn on byte/packet accounting + flow timestamps for the duration of the
     # run and restore the host's original settings on exit (see SysctlGuard).

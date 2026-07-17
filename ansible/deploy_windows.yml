@@ -1,0 +1,34 @@
+---
+# Deploy the commatrix collector on Windows Server hosts (WinRM).
+#
+#   ansible-playbook -i inventory.ini deploy_windows.yml
+#
+# Requires Python 3.9+ on the targets. Installs the package with pip (the tool
+# stays standard-library-only at runtime; pip only places the code), then
+# registers a SYSTEM startup scheduled task via 'commatrix install-windows'
+# (the Windows analogue of the systemd unit), which also secures the data dir
+# ACL to SYSTEM+Administrators.
+- name: Deploy commatrix on Windows
+  hosts: commatrix_windows
+  gather_facts: false
+
+  vars:
+    commatrix_src_dir: 'C:\commatrix-src'
+
+  tasks:
+    - name: Check python is present
+      ansible.windows.win_command: python --version
+      changed_when: false
+
+    - name: Copy commatrix source to the host
+      ansible.windows.win_copy:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ commatrix_src_dir }}\\"
+
+    - name: Install the commatrix package (pip places code; no runtime deps)
+      ansible.windows.win_shell: python -m pip install .
+      args:
+        chdir: "{{ commatrix_src_dir }}"
+
+    - name: Install and start the SYSTEM startup task + secure data dir
+      ansible.windows.win_command: python -m commatrix install-windows

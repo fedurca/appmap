@@ -201,16 +201,16 @@ class Store:
 
     @staticmethod
     def _restrict_permissions(path, directory, created_dir, db_existed) -> None:
-        try:
-            if not db_existed:
-                os.chmod(path, DB_FILE_MODE)
-                for suffix in ("-wal", "-shm"):
-                    if os.path.exists(path + suffix):
-                        os.chmod(path + suffix, DB_FILE_MODE)
-            if created_dir and directory:
-                os.chmod(directory, DB_DIR_MODE)
-        except OSError:
-            pass
+        # Delegated to the platform layer: chmod on Linux, NTFS ACL on Windows.
+        from . import platform as _plat
+
+        if not db_existed:
+            _plat.secure_permissions(path)
+            for suffix in ("-wal", "-shm"):
+                if os.path.exists(path + suffix):
+                    _plat.secure_permissions(path + suffix)
+        if created_dir and directory:
+            _plat.secure_permissions(directory, is_dir=True)
 
     def _readonly_guard(self) -> None:
         if self.read_only:

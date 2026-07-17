@@ -53,50 +53,72 @@ def _write_output(text: str, output: Optional[str]) -> None:
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
-    import os
-
+    from . import platform as _platform
     from .collector import run_loop
-    from .conntrack import is_root, running_under_systemd
 
     log = logging.getLogger("commatrix")
     config = load_config(args.config)
     if args.database:
         config.database = args.database
 
-    # Root is optional: by default the collector runs unprivileged (topology is
-    # still captured). Only hard-require root when asked (flag or config), e.g.
-    # when full sysctl accounting / cross-user attribution is mandatory.
+    # Privilege is optional by default (topology is still captured). Only hard-
+    # require it when asked (full accounting / cross-user attribution).
     require_root = args.require_root or config.require_root
-    if require_root and not is_root():
-        log.warning(
-            "root required (--require-root/require_root set) but running as "
-            "uid=%d; refusing to start",
-            os.geteuid(),
-        )
+    if require_root and not _platform.is_privileged():
+        log.warning("privileged run required (--require-root/require_root) but not "
+                    "running as root/Administrator; refusing to start")
         return 1
 
-    # By design commatrix is run as a systemd service (which also enforces the
-    # CPU/memory limits, capabilities and sysctl restore). Refuse to run
-    # otherwise unless explicitly overridden for labs/testing.
-    if not running_under_systemd() and not args.allow_manual:
+    # By design commatrix runs as a service (systemd on Linux, a SYSTEM startup
+    # task on Windows), which also enforces resource limits. Refuse otherwise
+    # unless explicitly overridden for labs/testing.
+    if not _platform.running_as_service() and not args.allow_manual:
         log.warning(
-            "commatrix collect is intended to run as a systemd service; not "
-            "started by systemd (no INVOCATION_ID) and --allow-manual not given "
-            "- doing nothing"
+            "commatrix collect is intended to run as a service; not started by "
+            "the service manager and --allow-manual not given - doing nothing"
         )
         return 0
 
-    if not is_root():
+    if not _platform.is_privileged():
         log.info(
-            "running unprivileged (uid=%d): topology is captured; toggling "
-            "nf_conntrack sysctls and attributing other users' processes need "
-            "CAP_NET_ADMIN / CAP_DAC_READ_SEARCH (or root)",
-            os.geteuid(),
+            "running unprivileged: topology is captured; full byte accounting, "
+            "event-driven capture and cross-user/namespace attribution need "
+            "root/Administrator (or the documented capabilities)"
         )
 
     iterations = 1 if args.once else args.iterations
     run_loop(config, iterations=iterations)
     return 0
+
+
+def cmd_install_windows(args: argparse.Namespace) -> int:
+    """Install commatrix as a Windows startup task (SYSTEM) with secured data dir."""
+
+    import os
+
+    from . import platform as _platform
+    log = logging.getLogger("commatrix")
+    if not _platform.IS_WINDOWS:
+        log.error("install-windows is only for Windows hosts")
+        return 1
+    from .platform.win import runtime
+
+    if not runtime.is_admin():
+        log.error("install-windows requires Administrator privileges")
+        return 1
+
+    data_dir = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "commatrix")
+    conf = args.config or os.path.join(data_dir, "commatrix.conf")
+    os.makedirs(data_dir, exist_ok=True)
+    _platform.secure_permissions(data_dir, is_dir=True)
+    if not os.path.exists(conf):
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write("[collector]\ndatabase = %s\n" % os.path.join(data_dir, "commatrix.db"))
+        _platform.secure_permissions(conf)
+
+    ok = runtime.install_service(conf)
+    log.info("windows service %s", "installed and started" if ok else "installation FAILED")
+    return 0 if ok else 1
 
 
 def cmd_restore_sysctls(args: argparse.Namespace) -> int:
@@ -391,6 +413,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="refuse to start unless running as root",
     )
     p_collect.set_defaults(func=cmd_collect)
+
+    p_winsvc = sub.add_parser("install-windows", help="install as a Windows startup task (SYSTEM)")
+    _add_common(p_winsvc)
+    p_winsvc.set_defaults(func=cmd_install_windows)
 
     p_restore = sub.add_parser(
         "restore-sysctls",

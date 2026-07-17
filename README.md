@@ -230,6 +230,34 @@ Beyond raw flows, Commatrix enriches the catalog with:
 - security highlights (external inbound exposure, cleartext protocols),
 - documentation outputs (matrix, topology diagram, per-app service sheets, CMDB-ready JSON).
 
+## Windows Server
+
+commatrix runs on Windows Server too, keeping every principle (standard library
+only - `ctypes`/`winreg`/`socket`/`subprocess` to built-in tools; no pywin32, no
+libpcap). A platform layer (`commatrix/platform/`) routes OS-specific capture
+while the core (store, report, aggregate, catalog, DoH/SNI logic) is shared, so
+the snapshot/report contract is identical and Linux + Windows merge into one
+report.
+
+Linux -> Windows mapping:
+
+- connections + owning PID: IP Helper API `GetExtendedTcpTable` (ctypes) instead
+  of `/proc/net/tcp` + inode walk;
+- byte accounting: TCP ESTATS (best-effort) instead of sock_diag/nf_conntrack;
+- DNS logging: DNS-Client event channel (`wevtutil`, ETW real-time is a
+  follow-up) instead of the systemd-resolved monitor;
+- DoH posture: registry policies (`winreg`) instead of policy files;
+- SNI capture: raw socket `SIO_RCVALL` (opt-in, Administrator) instead of
+  AF_PACKET - same TLS ClientHello parser;
+- time posture: `w32tm /query /status` instead of `timedatectl`/chrony;
+- resource safety: Job Object CPU/memory caps + `IDLE_PRIORITY_CLASS` instead of
+  CPUQuota/nice; disk budget via `shutil.disk_usage`;
+- data-at-rest ACL via `icacls`; runs as a SYSTEM startup task
+  (`commatrix install-windows`) instead of a systemd unit.
+
+Install on a host (Administrator): `python -m commatrix install-windows`. Deploy
+a fleet with [`ansible/deploy_windows.yml`](ansible/deploy_windows.yml).
+
 ## Architecture
 
 ```mermaid

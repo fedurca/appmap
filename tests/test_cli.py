@@ -20,34 +20,34 @@ class CollectGateTest(unittest.TestCase):
             setattr(ns, k, v)
         return ns
 
-    def test_refuses_when_not_under_systemd(self):
-        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
-             mock.patch("commatrix.conntrack.running_under_systemd", return_value=False), \
+    def test_refuses_when_not_under_service(self):
+        with mock.patch("commatrix.platform.is_privileged", return_value=False), \
+             mock.patch("commatrix.platform.running_as_service", return_value=False), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args())
         self.assertEqual(rc, 0)
         run_loop.assert_not_called()
 
     def test_runs_unprivileged_with_allow_manual(self):
-        # Root is NOT required by default; unprivileged run is allowed.
-        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
-             mock.patch("commatrix.conntrack.running_under_systemd", return_value=False), \
+        # Privilege is NOT required by default; unprivileged run is allowed.
+        with mock.patch("commatrix.platform.is_privileged", return_value=False), \
+             mock.patch("commatrix.platform.running_as_service", return_value=False), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args(allow_manual=True))
         self.assertEqual(rc, 0)
         run_loop.assert_called_once()
 
-    def test_require_root_refuses_non_root(self):
-        with mock.patch("commatrix.conntrack.is_root", return_value=False), \
-             mock.patch("commatrix.conntrack.running_under_systemd", return_value=True), \
+    def test_require_root_refuses_non_privileged(self):
+        with mock.patch("commatrix.platform.is_privileged", return_value=False), \
+             mock.patch("commatrix.platform.running_as_service", return_value=True), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args(require_root=True))
         self.assertEqual(rc, 1)
         run_loop.assert_not_called()
 
-    def test_runs_under_systemd(self):
-        with mock.patch("commatrix.conntrack.is_root", return_value=True), \
-             mock.patch("commatrix.conntrack.running_under_systemd", return_value=True), \
+    def test_runs_under_service(self):
+        with mock.patch("commatrix.platform.is_privileged", return_value=True), \
+             mock.patch("commatrix.platform.running_as_service", return_value=True), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args(allow_manual=False))
         self.assertEqual(rc, 0)

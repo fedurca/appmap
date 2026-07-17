@@ -136,19 +136,10 @@ def _check_resolved() -> List[DohFinding]:
                        detail=f"DNSOverTLS={dot}", origin=origin)]
 
 
-def doh_posture() -> Dict[str, object]:
-    """Return the host's DoH posture: per-source findings + an assessment."""
+def summarize(findings: List[DohFinding]) -> Dict[str, object]:
+    """Turn per-source findings into an overall assessment (shared by all OSes)."""
 
-    findings: List[DohFinding] = []
-    findings.extend(_check_chromium_family())
-    findings.extend(_check_firefox())
-    findings.extend(_check_resolved())
-
-    configured = [f for f in findings if f.status not in ("not-configured", "unknown")]
     any_on = any(f.status == "on" for f in findings)
-    enforced_off = [f for f in configured if f.status == "enforced-off"]
-    # "Disabled and prohibited" == every browser that could do DoH has it
-    # enforced off (locked/managed), and none is enabled.
     browser_sources = [f for f in findings if f.source in ("chrome", "chromium", "edge", "firefox")]
     browsers_present = [f for f in browser_sources if f.status != "not-configured"]
     all_browsers_enforced_off = bool(browsers_present) and all(
@@ -170,6 +161,16 @@ def doh_posture() -> Dict[str, object]:
         "doh_enforced_off": all_browsers_enforced_off,
         "findings": [asdict(f) for f in findings],
     }
+
+
+def doh_posture() -> Dict[str, object]:
+    """Return the host's DoH posture: per-source findings + an assessment."""
+
+    findings: List[DohFinding] = []
+    findings.extend(_check_chromium_family())
+    findings.extend(_check_firefox())
+    findings.extend(_check_resolved())
+    return summarize(findings)
 
 
 def host_params() -> Dict[str, object]:

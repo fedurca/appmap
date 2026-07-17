@@ -14,6 +14,7 @@ merge them on a control node and generate one analytical overview.
 | `collect.yml` | export + fetch a JSON snapshot from every host |
 | `report.yml` | merge snapshots + build the report (control node) |
 | `pull_and_report.yml` | `collect.yml` + `report.yml` in one run |
+| `deploy_windows.yml` | install the collector on Windows Server hosts (WinRM) |
 
 ## Prerequisites
 
@@ -58,3 +59,7 @@ Run only part of it with `deploy.yml`, `collect.yml` or `report.yml` directly.
 - The merged `central.db` distinguishes hosts by the `host` column; the report's
   topology, matrix, per-host DoH/time posture and coverage stats all work across
   the whole fleet.
+- **Windows Server:** deploy with `ansible-playbook -i inventory.ini
+  deploy_windows.yml` (hosts in the `[commatrix_windows]` group, WinRM). Windows
+  hosts export the same snapshot JSON, so `collect.yml`/`report.yml` merge them
+  into the same central report alongside Linux.

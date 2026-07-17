@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from dataclasses import dataclass
 
 log = logging.getLogger("commatrix.resources")
@@ -103,13 +104,13 @@ class ResourceGovernor:
     def disk_status(self, path: str, db_bytes: int) -> DiskStatus:
         directory = os.path.dirname(os.path.abspath(path)) or "."
         try:
-            st = os.statvfs(directory)
+            # Cross-platform (Linux + Windows); avoids os.statvfs which is POSIX-only.
+            usage = shutil.disk_usage(directory)
         except OSError:
             # Unknown filesystem; report permissive status.
             return DiskStatus(total=0, free=0, db_bytes=db_bytes, budget_bytes=db_bytes + 1, free_fraction=1.0)
-        block = st.f_frsize
-        free = st.f_bavail * block
-        total = st.f_blocks * block
+        free = usage.free
+        total = usage.total
         # Budget is a fraction of what would be free if the DB were removed,
         # so the limit is stable as the DB grows.
         budget = int((free + db_bytes) * self.disk_budget)

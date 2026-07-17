@@ -105,6 +105,48 @@ def parse_client_hello(payload: bytes) -> Optional[Tuple[Optional[str], bool]]:
         return None
 
 
+def parse_ip_packet(pkt: bytes, ports: set) -> Optional[SniEvent]:
+    """Parse an IP packet (starting at the IP header) for a TLS ClientHello SNI.
+
+    Shared by the Linux AF_PACKET path (after stripping Ethernet) and the Windows
+    SIO_RCVALL raw-socket path (which delivers IP-layer packets directly).
+    """
+
+    n = len(pkt)
+    if n < 20:
+        return None
+    version = pkt[0] >> 4
+    if version == 4:
+        ihl = (pkt[0] & 0x0F) * 4
+        proto = pkt[9]
+        dst_ip = socket.inet_ntop(socket.AF_INET, pkt[16:20])
+        l4 = ihl
+    elif version == 6:
+        if n < 40:
+            return None
+        proto = pkt[6]
+        dst_ip = socket.inet_ntop(socket.AF_INET6, pkt[24:40])
+        l4 = 40
+    else:
+        return None
+
+    if proto != _IPPROTO_TCP or n < l4 + 20:
+        return None
+    dst_port = struct.unpack_from("!H", pkt, l4 + 2)[0]
+    if dst_port not in ports:
+        return None
+    data_off = (pkt[l4 + 12] >> 4) * 4
+    payload = pkt[l4 + data_off:]
+    parsed = parse_client_hello(payload)
+    if parsed is None:
+        return None
+    sni, ech = parsed
+    name = sni if sni else ("<ech>" if ech else None)
+    if not name:
+        return None
+    return SniEvent(ts=time.time(), dst_ip=dst_ip, dst_port=dst_port, sni=name)
+
+
 def _parse_frame(frame: bytes, ports: set) -> Optional[SniEvent]:
     n = len(frame)
     if n < 14:
@@ -116,38 +158,9 @@ def _parse_frame(frame: bytes, ports: set) -> Optional[SniEvent]:
             return None
         eth_type = struct.unpack_from("!H", frame, 16)[0]
         off = 18
-
-    if eth_type == _ETH_P_IP:
-        if n < off + 20:
-            return None
-        ihl = (frame[off] & 0x0F) * 4
-        proto = frame[off + 9]
-        dst_ip = socket.inet_ntop(socket.AF_INET, frame[off + 16: off + 20])
-        l4 = off + ihl
-    elif eth_type == _ETH_P_IPV6:
-        if n < off + 40:
-            return None
-        proto = frame[off + 6]
-        dst_ip = socket.inet_ntop(socket.AF_INET6, frame[off + 24: off + 40])
-        l4 = off + 40
-    else:
+    if eth_type not in (_ETH_P_IP, _ETH_P_IPV6):
         return None
-
-    if proto != _IPPROTO_TCP or n < l4 + 20:
-        return None
-    dst_port = struct.unpack_from("!H", frame, l4 + 2)[0]
-    if dst_port not in ports:
-        return None
-    data_off = (frame[l4 + 12] >> 4) * 4
-    payload = frame[l4 + data_off:]
-    parsed = parse_client_hello(payload)
-    if parsed is None:
-        return None
-    sni, ech = parsed
-    name = sni if sni else ("<ech>" if ech else None)
-    if not name:
-        return None
-    return SniEvent(ts=time.time(), dst_ip=dst_ip, dst_port=dst_port, sni=name)
+    return parse_ip_packet(frame[off:], ports)
 
 
 def available() -> bool:

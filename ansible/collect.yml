@@ -34,3 +34,32 @@
         src: "{{ remote_snapshot }}"
         dest: "{{ commatrix_local_dir }}/snapshots/{{ inventory_hostname }}.json"
         flat: true
+
+
+# Windows hosts (WinRM): identical snapshot JSON contract -> merged into the same
+# central DB by report.yml. Skips cleanly if the group is empty.
+- name: Collect commatrix snapshots (Windows)
+  hosts: commatrix_windows
+  gather_facts: false
+
+  vars:
+    remote_snapshot: 'C:\ProgramData\commatrix\snapshots\{{ inventory_hostname }}.json'
+
+  tasks:
+    - name: Export a JSON snapshot on the Windows host
+      ansible.windows.win_shell: >-
+        python -m commatrix export -o "{{ remote_snapshot }}"
+
+    - name: Ensure local snapshot directory exists
+      ansible.builtin.file:
+        path: "{{ commatrix_local_dir }}/snapshots"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fetch Windows snapshot to the control node
+      ansible.windows.win_fetch:
+        src: "{{ remote_snapshot }}"
+        dest: "{{ commatrix_local_dir }}/snapshots/{{ inventory_hostname }}.json"
+        flat: true
