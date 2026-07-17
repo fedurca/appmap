@@ -6,8 +6,9 @@
 poll_interval = 5
 # Local SQLite database path.
 database = /var/lib/commatrix/commatrix.db
-# Capture source: auto | procfs | conntrack-events | sockets
-# auto picks procfs, then distro conntrack (if present), then /proc/net/tcp fallback.
+# Capture source: auto | procfs | conntrack-events | socket-diag | sockets
+# auto picks procfs, then distro conntrack (if present), then sock_diag netlink
+# (per-socket TCP byte counts, no install needed), then /proc/net/tcp fallback.
 source = auto
 # Optional explicit hostname (otherwise taken from the Zabbix agent / OS).
 # hostname = web01.example.com

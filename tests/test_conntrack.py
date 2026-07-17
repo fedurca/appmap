@@ -65,7 +65,8 @@ class ConntrackParseTest(unittest.TestCase):
 
     def test_resolve_source_auto_falls_back_to_sockets(self):
         with mock.patch.object(ct, "proc_available", return_value=False), \
-             mock.patch.object(ct, "conntrack_tool_available", return_value=False):
+             mock.patch.object(ct, "conntrack_tool_available", return_value=False), \
+             mock.patch.object(ct.sockdiag, "available", return_value=False):
             self.assertEqual(ct.resolve_source("auto"), "sockets")
 
     def test_entries_from_sockets(self):

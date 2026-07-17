@@ -28,6 +28,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
+from . import sockdiag
 from .sockets import SocketEntry, read_all_sockets
 
 log = logging.getLogger("commatrix.conntrack")
@@ -442,6 +443,41 @@ def read_socket_entries() -> List[ConntrackEntry]:
     return entries_from_sockets()
 
 
+def entries_from_sockdiag() -> List[ConntrackEntry]:
+    """Build conntrack rows from the ``sock_diag`` netlink interface.
+
+    Unlike the plain ``/proc/net/{tcp,udp}`` fallback, this carries *real*
+    per-socket byte/packet counters for TCP (from ``tcp_info``) with no extra
+    package and no ``nf_conntrack``.  UDP has no such counters, so UDP flows are
+    still taken from procfs (with zero bytes) to preserve visibility.
+    """
+
+    entries: List[ConntrackEntry] = []
+    for d in sockdiag.read_tcp_diag():
+        entries.append(
+            ConntrackEntry(
+                l4proto="tcp",
+                state=d.state,
+                orig_src=d.local_ip,
+                orig_dst=d.remote_ip,
+                orig_sport=d.local_port,
+                orig_dport=d.remote_port,
+                orig_bytes=d.bytes_sent,
+                orig_packets=d.packets_sent,
+                reply_src=d.remote_ip,
+                reply_dst=d.local_ip,
+                reply_sport=d.remote_port,
+                reply_dport=d.local_port,
+                reply_bytes=d.bytes_recv,
+                reply_packets=d.packets_recv,
+            )
+        )
+    # UDP has no tcp_info; keep it visible via procfs (zero bytes).
+    udp_socks = [s for s in read_all_sockets() if s.proto == "udp"]
+    entries.extend(entries_from_sockets(udp_socks))
+    return entries
+
+
 def read_conntrack_list(binary: str = "conntrack") -> List[ConntrackEntry]:
     """Snapshot currently tracked flows via ``conntrack -L`` when already installed."""
 
@@ -489,6 +525,11 @@ def read_conntrack_snapshot(source: str = "auto") -> List[ConntrackEntry]:
         if proc_available():
             return read_proc_conntrack()
         return read_socket_entries()
+    if effective == "socket-diag":
+        try:
+            return entries_from_sockdiag()
+        except OSError:
+            return read_socket_entries()
     if effective == "sockets":
         return read_socket_entries()
     raise ValueError(f"unknown conntrack source: {effective!r}")
@@ -503,13 +544,19 @@ def capture_backend(source: str = "auto") -> str:
             return "procfs"
         if conntrack_tool_available():
             return "conntrack-list"
+        if sockdiag.available():
+            return "socket-diag"
         return "sockets"
     if effective == "conntrack-events":
         if conntrack_tool_available():
             return "conntrack-list"
         if proc_available():
             return "procfs"
+        if sockdiag.available():
+            return "socket-diag"
         return "sockets"
+    if effective == "socket-diag":
+        return "socket-diag" if sockdiag.available() else "sockets"
     if effective == "sockets":
         return "sockets"
     raise ValueError(f"unknown conntrack source: {effective!r}")
@@ -536,8 +583,9 @@ def resolve_source(preferred: str) -> str:
 
     * ``auto`` -> ``procfs`` when ``/proc/net/nf_conntrack`` exists, else
       ``conntrack -L`` when the distro already ships ``conntrack``, else
-      ``/proc/net/{tcp,udp}`` socket tables (always available, no byte counts).
-    * ``procfs`` / ``conntrack-events`` / ``sockets`` -> validated as-is.
+      ``socket-diag`` (sock_diag netlink: real per-socket byte counts, no extra
+      package), else ``/proc/net/{tcp,udp}`` socket tables (no byte counts).
+    * ``procfs`` / ``conntrack-events`` / ``socket-diag`` / ``sockets`` -> as-is.
     """
 
     if preferred == "auto":
@@ -545,8 +593,10 @@ def resolve_source(preferred: str) -> str:
             return "procfs"
         if conntrack_tool_available():
             return "conntrack-events"
+        if sockdiag.available():
+            return "socket-diag"
         return "sockets"
-    if preferred in ("procfs", "conntrack-events", "sockets"):
+    if preferred in ("procfs", "conntrack-events", "sockets", "socket-diag"):
         return preferred
     raise ValueError(f"unknown conntrack source: {preferred!r}")
 

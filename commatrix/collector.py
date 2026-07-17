@@ -149,6 +149,10 @@ class Collector:
             data_quality = None
             if self.capture_backend == "sockets":
                 data_quality = "socket-snapshot"
+            elif self.capture_backend == "socket-diag":
+                # Real per-socket byte counts (TCP). UDP has none but that is
+                # inherent, not a capture limitation, so leave it unflagged.
+                data_quality = None
             elif not accounting or (agg.snapshot_bytes == 0 and agg.snapshot_packets == 0):
                 data_quality = "no-accounting"
 
@@ -328,8 +332,13 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     )
     if backend == "sockets":
         log.info(
-            "using /proc/net/{tcp,udp} fallback (no nf_conntrack procfs); "
-            "byte/packet counts will be zero"
+            "using /proc/net/{tcp,udp} fallback (no nf_conntrack procfs, no "
+            "conntrack tool, no sock_diag); byte/packet counts will be zero"
+        )
+    elif backend == "socket-diag":
+        log.info(
+            "using sock_diag netlink for per-socket TCP byte/packet accounting "
+            "(no nf_conntrack/conntrack-tools needed)"
         )
     try:
         while iterations is None or count < iterations:

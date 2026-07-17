@@ -97,7 +97,7 @@ def matrix_markdown(store: Store, host: Optional[str] = None) -> str:
     lines = ["# Communication matrix", ""]
     header = [
         "Host", "Dir", "Service", "Port", "L7", "Peer", "Class",
-        "Bytes", "First seen", "Last seen", "Max gap", "Process",
+        "Bytes", "First seen", "Last seen", "Max gap", "Seen (n)", "Process",
     ]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
@@ -118,6 +118,7 @@ def matrix_markdown(store: Store, host: Optional[str] = None) -> str:
                     fmt_time(r.get("first_seen")),
                     fmt_time(r.get("last_seen")),
                     fmt_duration(r.get("max_gap")),
+                    str(r.get("observations") or 0),
                     str(r.get("process_comm") or ""),
                 ]
             )
@@ -225,25 +226,52 @@ def _svg_pie_chart(title: str, items: Sequence[ChartItem], size: int = 260) -> s
     return "\n".join(parts)
 
 
+VT_IP_URL = "https://www.virustotal.com/gui/ip-address/"
+VT_DOMAIN_URL = "https://www.virustotal.com/gui/domain/"
+
+
+def vt_peer_html(row: Dict[str, object]) -> str:
+    """Render the peer cell, linking external IoCs to VirusTotal.
+
+    External peers are indicators of compromise candidates, so their IP (and
+    reverse-DNS name, if any) become one-click VirusTotal lookups. Internal /
+    loopback peers are rendered as plain escaped text.
+    """
+
+    peer_ip = str(row.get("peer_ip") or "")
+    display = str(row.get("peer_name") or peer_ip)
+    if row.get("peer_class") == "external" and peer_ip:
+        url = VT_IP_URL + peer_ip
+        return (
+            f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer" '
+            f'title="Check {html.escape(peer_ip)} on VirusTotal">{html.escape(display)} \u2197</a>'
+        )
+    return html.escape(display)
+
+
 def _matrix_html_table(rows: List[Dict[str, object]], limit: int = 100) -> str:
     header = [
-        "Host", "Dir", "Service", "Port", "Peer", "Class", "Bytes", "Last seen", "Process",
+        "Host", "Dir", "Service", "Port", "Peer", "Class", "Bytes",
+        "First seen", "Last seen", "Seen (n)", "Process",
     ]
     lines = ["<table>", "<thead><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in header) + "</tr></thead>", "<tbody>"]
     for row in sorted(rows, key=lambda x: float(x.get("bytes") or 0), reverse=True)[:limit]:
-        peer = row.get("peer_name") or row.get("peer_ip")
-        cells = [
-            str(row.get("host", "")),
-            str(row.get("direction", "")),
-            str(row.get("service_name", "")),
-            str(row.get("service_port", "")),
-            str(peer or ""),
-            str(row.get("peer_class") or ""),
-            human_bytes(row.get("bytes")),
-            fmt_time(row.get("last_seen")),
-            str(row.get("process_comm") or ""),
+        # Peer cell is raw HTML (VirusTotal link for external IoCs); the rest
+        # are plain escaped values.
+        plain_cells = [
+            html.escape(str(row.get("host", ""))),
+            html.escape(str(row.get("direction", ""))),
+            html.escape(str(row.get("service_name", ""))),
+            html.escape(str(row.get("service_port", ""))),
+            vt_peer_html(row),
+            html.escape(str(row.get("peer_class") or "")),
+            html.escape(human_bytes(row.get("bytes"))),
+            html.escape(fmt_time(row.get("first_seen"))),
+            html.escape(fmt_time(row.get("last_seen"))),
+            html.escape(str(row.get("observations") or 0)),
+            html.escape(str(row.get("process_comm") or "")),
         ]
-        lines.append("<tr>" + "".join(f"<td>{html.escape(c)}</td>" for c in cells) + "</tr>")
+        lines.append("<tr>" + "".join(f"<td>{c}</td>" for c in plain_cells) + "</tr>")
     lines.extend(["</tbody>", "</table>"])
     return "\n".join(lines)
 
@@ -270,6 +298,25 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     total_bytes = sum(float(r.get("bytes") or 0) for r in rows)
     total_flows = len(rows)
 
+    # Explain missing volume instead of silently showing 0 B everywhere.
+    no_acct = len(security["no_accounting"])
+    banner = ""
+    if total_flows and total_bytes == 0 and no_acct:
+        banner = (
+            '<div class="note">&#9888; Byte/packet volume is unavailable: the '
+            "active capture backend cannot measure traffic (no nf_conntrack "
+            "accounting and no sock_diag). Volume shows as 0&nbsp;B. commatrix "
+            "uses sock_diag automatically when available (no install needed); "
+            "otherwise enable nf_conntrack with "
+            "<code>net.netfilter.nf_conntrack_acct=1</code>.</div>"
+        )
+    elif no_acct:
+        banner = (
+            f'<div class="note">&#9888; {no_acct} flow(s) lack byte accounting '
+            "(e.g. UDP or socket-snapshot capture); their volume shows as "
+            "0&nbsp;B.</div>"
+        )
+
     sec_sections = []
     for title, items in (
         ("External inbound exposure", security["external_inbound"]),
@@ -279,7 +326,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
         if items:
             lis = "".join(
                 f"<li>{html.escape(str(it['host']))} {html.escape(str(it['service']))}:"
-                f"{html.escape(str(it['port']))} &lt;-&gt; {html.escape(str(it['peer']))}</li>"
+                f"{html.escape(str(it['port']))} &lt;-&gt; {vt_peer_html(it)}</li>"
                 for it in items
             )
             sec_sections.append(f"<section><h3>{html.escape(title)} ({len(items)})</h3><ul>{lis}</ul></section>")
@@ -309,6 +356,9 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     th, td {{ border-bottom: 1px solid #334155; padding: .45rem .5rem; text-align: left; vertical-align: top; }}
     th {{ position: sticky; top: 0; background: #111827; }}
     pre.mermaid {{ background: transparent; white-space: pre-wrap; }}
+    .note {{ background: #3f2d0b; border: 1px solid #a16207; color: #fde68a; border-radius: 10px; padding: .75rem 1rem; margin: 1rem 0; }}
+    .note code {{ background: rgba(0,0,0,.35); padding: 0 .3rem; border-radius: 4px; }}
+    a {{ color: #93c5fd; }}
     footer {{ color: #94a3b8; border-top: 1px solid #334155; }}
   </style>
   <script type="module">
@@ -328,6 +378,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
       <div class="card"><div>Hosts</div><div class="metric">{len(store.list_hosts())}</div></div>
       <div class="card"><div>Security findings</div><div class="metric">{len(security['external_inbound']) + len(security['cleartext_external'])}</div></div>
     </section>
+    {banner}
 
     <h2>Traffic graphs</h2>
     <div class="charts">
@@ -578,6 +629,8 @@ def security_highlights(store: Store) -> Dict[str, List[Dict[str, object]]]:
             "service": r.get("service_name"),
             "port": r.get("service_port"),
             "peer": r.get("peer_name") or r.get("peer_ip"),
+            "peer_ip": r.get("peer_ip"),
+            "peer_class": peer_class,
             "l7": l7 or None,
             "direction": direction,
         }
@@ -585,7 +638,9 @@ def security_highlights(store: Store) -> Dict[str, List[Dict[str, object]]]:
             external_inbound.append(summary)
         if peer_class == "external" and l7 in CLEARTEXT_L7:
             cleartext_external.append(summary)
-        if r.get("data_quality") == "no-accounting":
+        # Flag flows whose capture backend cannot measure byte volume: both the
+        # nf_conntrack "no accounting" case and the /proc socket-snapshot fallback.
+        if r.get("data_quality") in ("no-accounting", "socket-snapshot"):
             no_accounting.append(summary)
 
     return {
@@ -624,6 +679,8 @@ def security_markdown(store: Store) -> str:
     section(
         "Flows without byte accounting",
         data["no_accounting"],
-        "Enable net.netfilter.nf_conntrack_acct=1 to capture byte/packet counts.",
+        "Byte/packet volume unavailable for these flows. Use a capture backend "
+        "that measures volume: sock_diag (automatic, no install) or "
+        "nf_conntrack with net.netfilter.nf_conntrack_acct=1.",
     )
     return "\n".join(lines) + "\n"

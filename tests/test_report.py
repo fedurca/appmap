@@ -123,6 +123,22 @@ class ReportTest(unittest.TestCase):
         self.assertIn("nginx", text)
         self.assertIn("flowchart LR", text)
 
+    def test_report_html_virustotal_link_for_external(self):
+        text = rp.report_html(self.store)
+        # external peer 203.0.113.9 should be a VirusTotal click-through
+        self.assertIn("virustotal.com/gui/ip-address/203.0.113.9", text)
+        # internal peer must NOT be linked to VirusTotal
+        self.assertNotIn("ip-address/10.0.0.20", text)
+
+    def test_report_html_has_first_seen_and_occurrences(self):
+        text = rp.report_html(self.store)
+        self.assertIn("First seen", text)
+        self.assertIn("Seen (n)", text)
+
+    def test_matrix_markdown_has_occurrences(self):
+        text = rp.matrix_markdown(self.store)
+        self.assertIn("Seen (n)", text)
+
     def test_write_html_report(self):
         out = os.path.join(self.tmp, "report.html")
         rp.write_html_report(self.store, out)

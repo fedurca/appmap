@@ -37,10 +37,12 @@ Reading `/proc/net/nf_conntrack` and `/proc/<pid>/fd` requires **root**.
 
 - Linux with the `nf_conntrack` module loaded (RHEL 8+, Ubuntu 20.04+ base images).
 - Python 3.9+ (standard library only — no pip dependencies).
-- No extra packages required: if `/proc/net/nf_conntrack` is absent, commatrix
-  falls back to `/proc/net/{tcp,udp}` automatically (topology still works; byte
-  counts are zero). Optional: `conntrack-tools` if already shipped by the distro,
-  or a Zabbix agent (`zabbix_get`/`zabbix_sender`) for host parameters.
+- No extra packages required. When `/proc/net/nf_conntrack` is absent commatrix
+  automatically uses the **`sock_diag` netlink** interface (the same source as
+  `ss -i`) to get *real per-socket TCP byte/packet counts with no install and
+  no root*; if even that is unavailable it falls back to `/proc/net/{tcp,udp}`
+  (topology only, zero bytes). Optional: `conntrack-tools` if already shipped by
+  the distro, or a Zabbix agent (`zabbix_get`/`zabbix_sender`) for host params.
 
 ## Install
 
