@@ -154,72 +154,94 @@ def _top_items(totals: Dict[str, float], limit: int = 10) -> List[ChartItem]:
     return sorted(totals.items(), key=lambda item: item[1], reverse=True)[:limit]
 
 
-def _svg_bar_chart(title: str, items: Sequence[ChartItem], width: int = 560, height: int = 260) -> str:
+def _svg_bar_chart(title: str, items: Sequence[ChartItem], width: int = 1000, height: int = 460) -> str:
     if not items:
-        return f'<svg viewBox="0 0 {width} {height}" role="img"><text x="20" y="40">No data</text></svg>'
+        return (
+            f'<svg viewBox="0 0 {width} 120" role="img" aria-label="{html.escape(title)}">'
+            f'<text x="16" y="34" font-size="22" font-weight="600">{html.escape(title)}</text>'
+            f'<text x="16" y="76" font-size="16" fill="#94a3b8">No data</text></svg>'
+        )
 
-    margin = {"top": 36, "right": 16, "bottom": 72, "left": 72}
+    margin = {"top": 52, "right": 24, "bottom": 116, "left": 96}
     plot_w = width - margin["left"] - margin["right"]
     plot_h = height - margin["top"] - margin["bottom"]
     max_val = max(v for _, v in items) or 1.0
     bar_w = plot_w / max(len(items), 1)
+    baseline = margin["top"] + plot_h
     parts = [
         f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)}">',
-        f'<text x="{margin["left"]}" y="22" font-size="14" font-weight="600">{html.escape(title)}</text>',
+        f'<text x="{margin["left"]}" y="30" font-size="22" font-weight="700">{html.escape(title)}</text>',
+        f'<line x1="{margin["left"]}" y1="{baseline:.1f}" x2="{width - margin["right"]}" '
+        f'y2="{baseline:.1f}" stroke="#334155" stroke-width="1"/>',
     ]
     for idx, (label, value) in enumerate(items):
         bar_h = (value / max_val) * plot_h if max_val else 0
         x = margin["left"] + idx * bar_w + bar_w * 0.12
-        y = margin["top"] + (plot_h - bar_h)
+        y = baseline - bar_h
         w = max(bar_w * 0.76, 1)
+        cx = x + w / 2
         parts.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{bar_h:.1f}" fill="#2563eb" rx="3"/>'
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{bar_h:.1f}" fill="#2563eb" rx="4"/>'
         )
         parts.append(
-            f'<text x="{x + w / 2:.1f}" y="{height - 12}" font-size="10" text-anchor="middle" '
-            f'transform="rotate(-35 {x + w / 2:.1f} {height - 12})">{html.escape(label[:18])}</text>'
+            f'<text x="{cx:.1f}" y="{baseline + 18:.1f}" font-size="15" fill="#cbd5e1" text-anchor="end" '
+            f'transform="rotate(-35 {cx:.1f} {baseline + 18:.1f})">{html.escape(label[:26])}</text>'
         )
         parts.append(
-            f'<text x="{x + w / 2:.1f}" y="{y - 4:.1f}" font-size="10" text-anchor="middle">'
+            f'<text x="{cx:.1f}" y="{y - 8:.1f}" font-size="15" font-weight="600" text-anchor="middle">'
             f'{html.escape(human_bytes(value))}</text>'
         )
     parts.append("</svg>")
     return "\n".join(parts)
 
 
-def _svg_pie_chart(title: str, items: Sequence[ChartItem], size: int = 260) -> str:
+def _svg_pie_chart(title: str, items: Sequence[ChartItem], width: int = 680, height: int = 360) -> str:
     if not items:
-        return f'<svg viewBox="0 0 {size} {size}" role="img"><text x="20" y="40">No data</text></svg>'
+        return (
+            f'<svg viewBox="0 0 {width} 120" role="img" aria-label="{html.escape(title)}">'
+            f'<text x="16" y="34" font-size="22" font-weight="600">{html.escape(title)}</text>'
+            f'<text x="16" y="76" font-size="16" fill="#94a3b8">No data</text></svg>'
+        )
 
-    cx = cy = size / 2
-    radius = size * 0.32
+    cx, cy = 180.0, 200.0
+    radius = 130.0
     total = sum(v for _, v in items) or 1.0
     palette = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#64748b"]
     parts = [
-        f'<svg viewBox="0 0 {size} {size}" role="img" aria-label="{html.escape(title)}">',
-        f'<text x="{size / 2:.1f}" y="22" font-size="14" font-weight="600" text-anchor="middle">'
-        f'{html.escape(title)}</text>',
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)}">',
+        f'<text x="24" y="34" font-size="22" font-weight="700">{html.escape(title)}</text>',
     ]
     start = -math.pi / 2
-    legend_y = size - 18 - 14 * len(items)
+    legend_x = 2 * cx + 40
+    legend_y = 96
     for idx, (label, value) in enumerate(items):
         angle = (value / total) * 2 * math.pi
         end = start + angle
-        x1 = cx + radius * math.cos(start)
-        y1 = cy + radius * math.sin(start)
-        x2 = cx + radius * math.cos(end)
-        y2 = cy + radius * math.sin(end)
-        large = 1 if angle > math.pi else 0
         color = palette[idx % len(palette)]
-        parts.append(
-            f'<path d="M {cx:.1f} {cy:.1f} L {x1:.1f} {y1:.1f} A {radius:.1f} {radius:.1f} 0 '
-            f'{large} 1 {x2:.1f} {y2:.1f} Z" fill="{color}"/>'
-        )
+        if angle > 0:
+            # Full circle needs special handling (arc can't span 360°).
+            if angle >= 2 * math.pi - 1e-9:
+                parts.append(
+                    f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{radius:.1f}" fill="{color}"/>'
+                )
+            else:
+                x1 = cx + radius * math.cos(start)
+                y1 = cy + radius * math.sin(start)
+                x2 = cx + radius * math.cos(end)
+                y2 = cy + radius * math.sin(end)
+                large = 1 if angle > math.pi else 0
+                parts.append(
+                    f'<path d="M {cx:.1f} {cy:.1f} L {x1:.1f} {y1:.1f} A {radius:.1f} {radius:.1f} 0 '
+                    f'{large} 1 {x2:.1f} {y2:.1f} Z" fill="{color}"/>'
+                )
         pct = (value / total) * 100.0
+        ly = legend_y + idx * 34
         parts.append(
-            f'<text x="12" y="{legend_y + idx * 14:.1f}" font-size="11">'
-            f'<tspan fill="{color}">■</tspan> {html.escape(label)} '
-            f'({pct:.1f}%, {html.escape(human_bytes(value))})</text>'
+            f'<rect x="{legend_x:.1f}" y="{ly - 15:.1f}" width="20" height="20" rx="4" fill="{color}"/>'
+        )
+        parts.append(
+            f'<text x="{legend_x + 30:.1f}" y="{ly:.1f}" font-size="17">'
+            f'{html.escape(label)} ({pct:.1f}%, {html.escape(human_bytes(value))})</text>'
         )
         start = end
     parts.append("</svg>")
@@ -350,8 +372,10 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }}
     .card {{ background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 1rem; }}
     .metric {{ font-size: 1.6rem; font-weight: 700; }}
-    .charts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin: 1rem 0; }}
-    .panel {{ background: #111827; border: 1px solid #334155; border-radius: 12px; padding: .75rem; overflow: auto; }}
+    .charts {{ display: flex; flex-direction: column; gap: 1.5rem; margin: 1rem 0; }}
+    .panel {{ background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 1rem 1.25rem; overflow: auto; }}
+    .panel svg {{ width: 100%; height: auto; display: block; }}
+    .panel.pie {{ max-width: 720px; }}
     table {{ width: 100%; border-collapse: collapse; font-size: .9rem; }}
     th, td {{ border-bottom: 1px solid #334155; padding: .45rem .5rem; text-align: left; vertical-align: top; }}
     th {{ position: sticky; top: 0; background: #111827; }}
@@ -384,8 +408,8 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     <div class="charts">
       <div class="panel">{_svg_bar_chart("Top services by bytes", service_items)}</div>
       <div class="panel">{_svg_bar_chart("Top peers by bytes", peer_items)}</div>
-      <div class="panel">{_svg_pie_chart("Peer class mix", class_items)}</div>
-      <div class="panel">{_svg_pie_chart("Direction mix", direction_items)}</div>
+      <div class="panel pie">{_svg_pie_chart("Peer class mix", class_items)}</div>
+      <div class="panel pie">{_svg_pie_chart("Direction mix", direction_items)}</div>
     </div>
 
     <h2>Topology</h2>
