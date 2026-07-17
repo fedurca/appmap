@@ -186,6 +186,19 @@ class SysctlGuardTest(unittest.TestCase):
         self.assertIs(ct.read_sysctl_flag(acct), False)
 
 
+class CaptureQualityTest(unittest.TestCase):
+    def test_exact_when_conntrack_accounting(self):
+        self.assertEqual(ct.capture_quality("procfs", True), "exact")
+        self.assertEqual(ct.capture_quality("ct-netlink", True), "exact")
+
+    def test_topology_only_without_accounting(self):
+        self.assertEqual(ct.capture_quality("procfs", False), "topology-only")
+        self.assertEqual(ct.capture_quality("sockets", True), "topology-only")
+
+    def test_socket_diag_per_socket(self):
+        self.assertEqual(ct.capture_quality("socket-diag", False), "per-socket-tcp")
+
+
 class SystemdDetectionTest(unittest.TestCase):
     def test_running_under_systemd_true(self):
         with mock.patch.dict(os.environ, {"INVOCATION_ID": "abc123"}):

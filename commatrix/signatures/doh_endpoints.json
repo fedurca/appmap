@@ -1,0 +1,14 @@
+{
+  "description": "Known public DNS-over-HTTPS (DoH, tcp/443) and DNS-over-TLS (DoT, tcp/853) resolver endpoints. A flow to one of these on the matching port is likely encrypted DNS that bypasses the system resolver and DNS logging. Matched by IP (CIDR) or by resolved peer domain substring. Editable.",
+  "doh_ports": [443],
+  "dot_ports": [853],
+  "providers": [
+    {"name": "cloudflare", "cidrs": ["1.1.1.1/32", "1.0.0.1/32", "1.1.1.2/32", "1.0.0.2/32", "1.1.1.3/32", "1.0.0.3/32", "2606:4700:4700::1111/128", "2606:4700:4700::1001/128"], "domains": ["cloudflare-dns.com", "mozilla.cloudflare-dns.com", "one.one.one.one", "security.cloudflare-dns.com", "family.cloudflare-dns.com"]},
+    {"name": "google", "cidrs": ["8.8.8.8/32", "8.8.4.4/32", "2001:4860:4860::8888/128", "2001:4860:4860::8844/128"], "domains": ["dns.google", "dns.google.com"]},
+    {"name": "quad9", "cidrs": ["9.9.9.9/32", "149.112.112.112/32", "9.9.9.10/32", "149.112.112.10/32", "2620:fe::fe/128", "2620:fe::9/128"], "domains": ["dns.quad9.net", "dns9.quad9.net", "dns10.quad9.net"]},
+    {"name": "nextdns", "cidrs": ["45.90.28.0/24", "45.90.30.0/24"], "domains": ["dns.nextdns.io"]},
+    {"name": "adguard", "cidrs": ["94.140.14.14/32", "94.140.15.15/32", "94.140.14.140/32", "94.140.14.141/32"], "domains": ["dns.adguard.com", "dns.adguard-dns.com"]},
+    {"name": "opendns", "cidrs": ["208.67.222.222/32", "208.67.220.220/32", "208.67.222.123/32", "208.67.220.123/32"], "domains": ["doh.opendns.com", "dns.opendns.com"]},
+    {"name": "cleanbrowsing", "cidrs": ["185.228.168.9/32", "185.228.169.9/32"], "domains": ["doh.cleanbrowsing.org"]}
+  ]
+}

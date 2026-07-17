@@ -13,9 +13,13 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from . import conntrack as ct
+from . import ctnetlink
 from . import dns as dnsmod
 from . import dohcheck
+from . import dohdetect
+from . import netns as netnsmod
 from . import resources as rsrc
+from . import sni as snimod
 from . import timecheck
 from .catalog import Signatures, identify_service, load_signatures
 from .config import Config
@@ -44,11 +48,13 @@ class Collector:
         self.config = config
         self.classifier = NetworkClassifier(config.internal_cidrs)
         self.signatures: Signatures = load_signatures(config.signatures_dir)
+        self.doh_signatures = dohdetect.load_doh_signatures(config.signatures_dir)
         self._dns_cache: Dict[str, Optional[str]] = {}
         self._accounting_warned = False
         self.capture_backend = ct.capture_backend(config.source)
-        # Optional DNS monitor used to annotate peers with the resolved domain.
+        # Optional monitors used to annotate peers with the resolved domain.
         self.dns_monitor: Optional["dnsmod.DnsMonitor"] = None
+        self.sni_monitor: Optional["snimod.SniMonitor"] = None
 
     # -- socket / process context --------------------------------------
     def _socket_indexes(
@@ -102,15 +108,22 @@ class Collector:
         return name
 
     # -- one poll ------------------------------------------------------
-    def build_edges(self, entries: List[ct.ConntrackEntry]) -> List[EdgeObservation]:
-        sockets = read_all_sockets()
+    def _edges_from(
+        self,
+        entries: List[ct.ConntrackEntry],
+        sockets: List[SocketEntry],
+        netns_label: str,
+        container_override: Optional[str] = None,
+        pod_override: Optional[str] = None,
+    ) -> List[EdgeObservation]:
+        """Normalize one namespace's entries+sockets into edge observations."""
+
         local_ips = local_ips_from_sockets(sockets)
         listening_ports = set(listening_port_map(sockets).keys())
         established_idx, listening_idx = self._socket_indexes(sockets)
 
         flows = normalize_entries(entries, local_ips, listening_ports, self.classifier)
 
-        # Aggregate over ephemeral ports; attach owning pid per (pre-agg) flow.
         aggregated: Dict[_AggKey, _Agg] = {}
         pids_needed: Set[int] = set()
         for flow in flows:
@@ -151,18 +164,22 @@ class Collector:
             if self.config.resolve_external and flow.peer_class == "external":
                 peer_name = self._reverse_dns(flow.peer_ip)
 
-            # Domain the peer IP was resolved from (via the DNS monitor), kept
-            # as a separate field alongside the raw IP.
             peer_domain = None
             if self.dns_monitor is not None:
                 peer_domain = self.dns_monitor.lookup(flow.peer_ip)
+            if peer_domain is None and self.sni_monitor is not None:
+                peer_domain = self.sni_monitor.lookup(flow.peer_ip)
+
+            l7 = identity.l7_protocol
+            doh = self.doh_signatures.classify(flow.peer_ip, flow.service_port, peer_domain)
+            if doh and flow.peer_class == "external":
+                l7 = doh  # e.g. "doh:cloudflare" / "dot:google"
 
             data_quality = None
-            if self.capture_backend == "sockets":
+            if self.capture_backend == "sockets" or netns_label != "host":
+                # Non-host netns is captured from /proc/<pid>/net sockets -> no bytes.
                 data_quality = "socket-snapshot"
             elif self.capture_backend == "socket-diag":
-                # Real per-socket byte counts (TCP). UDP has none but that is
-                # inherent, not a capture limitation, so leave it unflagged.
                 data_quality = None
             elif not accounting or (agg.snapshot_bytes == 0 and agg.snapshot_packets == 0):
                 data_quality = "no-accounting"
@@ -184,12 +201,37 @@ class Collector:
                     process_exe=proc.exe if proc else None,
                     unit=proc.unit if proc else None,
                     package=proc.package if proc else None,
-                    container_id=proc.container_id if proc else None,
-                    l7_protocol=identity.l7_protocol,
+                    container_id=(proc.container_id if proc else None) or container_override,
+                    l7_protocol=l7,
                     data_quality=data_quality,
                     peer_domain=peer_domain,
+                    pod=(proc.pod if proc else None) or pod_override,
+                    netns=netns_label,
                 )
             )
+        return edges
+
+    def build_edges(self, entries: List[ct.ConntrackEntry]) -> List[EdgeObservation]:
+        # Host namespace from the passed entries (event/poll snapshot).
+        edges = self._edges_from(entries, read_all_sockets(), "host")
+
+        # Optionally capture container/other network namespaces via
+        # /proc/<pid>/net/* (needs root; enumerate only returns others as root).
+        if self.config.netns_scope in ("auto", "all") and ct.is_root():
+            try:
+                for ns in netnsmod.enumerate_netns(include_host=False):
+                    ns_sockets = read_all_sockets(proc_root=ns.proc_root)
+                    if not ns_sockets:
+                        continue
+                    ns_entries = ct.entries_from_sockets(ns_sockets)
+                    edges.extend(
+                        self._edges_from(
+                            ns_entries, ns_sockets, ns.label,
+                            container_override=ns.container_id, pod_override=ns.pod,
+                        )
+                    )
+            except OSError as exc:
+                log.debug("netns capture failed: %s", exc)
         return edges
 
     def poll_once(self, store: Store, host: str, now: Optional[float] = None) -> int:
@@ -225,6 +267,16 @@ class Collector:
             params.update(timecheck.host_params(self.config.ntp_check_server))
         except Exception as exc:  # noqa: BLE001 - posture is best-effort
             log.debug("time posture check failed: %s", exc)
+        # Explicit per-host data-quality indicator so SOC knows where byte counts
+        # are trustworthy vs topology-only.
+        try:
+            acct = ct.accounting_enabled()
+            params["capture.backend"] = self.capture_backend
+            params["capture.accounting"] = acct
+            params["capture.quality"] = ct.capture_quality(self.capture_backend, acct)
+            params["capture.netns_scope"] = self.config.netns_scope
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            log.debug("capture-quality check failed: %s", exc)
         store.upsert_host(host, params)
 
 
@@ -312,6 +364,21 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     collector = Collector(config)
     host = resolve_host(config)
     store = Store(config.database, event_min_gap=config.event_min_gap_seconds)
+
+    # Decide capture strategy: event-driven (netlink conntrack events) catches
+    # short-lived flows that snapshot polling misses. Falls back to polling.
+    event_listener: Optional[ctnetlink.ConntrackEventListener] = None
+    want_events = config.capture_mode in ("auto", "events")
+    if want_events and ctnetlink.available():
+        event_listener = ctnetlink.ConntrackEventListener()
+        collector.capture_backend = "ct-netlink"
+    elif config.capture_mode == "events":
+        log.warning(
+            "event-driven capture requested but netlink conntrack events are "
+            "unavailable (needs root/CAP_NET_ADMIN and nf_conntrack); "
+            "falling back to polling"
+        )
+
     collector.refresh_host_params(store, host)
     run_id = store.start_run(host)
 
@@ -354,12 +421,18 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
         log.debug("nf_conntrack sysctls already enabled; leaving as-is")
 
     count = 0
-    backend = ct.capture_backend(config.source)
+    backend = collector.capture_backend
     log.info(
         "commatrix collector started for host %s (db=%s, capture=%s, cpu<=%.0f%% of %d cores, disk<=%.0f%% free)",
         host, config.database, backend, config.cpu_budget_percent, governor.ncpu, config.disk_budget_percent,
     )
-    if backend == "sockets":
+    if backend == "ct-netlink":
+        log.info(
+            "event-driven capture via netlink conntrack events (catches short "
+            "flows missed by polling); poll_interval is the DB flush cadence"
+        )
+        event_listener.start()
+    elif backend == "sockets":
         log.info(
             "using /proc/net/{tcp,udp} fallback (no nf_conntrack procfs, no "
             "conntrack tool, no sock_diag); byte/packet counts will be zero"
@@ -390,6 +463,25 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
                 "DNS logging disabled"
             )
 
+    # Optional SNI capture (TLS ClientHello) for destination hostnames.
+    sni_monitor: Optional[snimod.SniMonitor] = None
+    if config.sni_enabled:
+        if snimod.available():
+            sni_monitor = snimod.SniMonitor(
+                interface=config.sni_interface, ports=tuple(config.sni_ports)
+            )
+            sni_monitor.start()
+            collector.sni_monitor = sni_monitor
+            log.info(
+                "SNI capture enabled (AF_PACKET, ports %s); note: ECH hides SNI",
+                ",".join(str(p) for p in config.sni_ports),
+            )
+        else:
+            log.warning(
+                "SNI capture requested but AF_PACKET is unavailable "
+                "(needs root/CAP_NET_RAW); SNI capture disabled"
+            )
+
     try:
         while iterations is None or count < iterations:
             start = time.time()
@@ -402,8 +494,15 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
                 if paused:
                     # Still read (cheap) so timing/CPU accounting is realistic,
                     # but skip recording to protect the disk.
-                    ct.read_conntrack_snapshot(config.source)
+                    if event_listener is not None:
+                        event_listener.drain()
+                    else:
+                        ct.read_conntrack_snapshot(config.source)
                     n = 0
+                elif event_listener is not None:
+                    # Event-driven: fold the events accumulated since last flush.
+                    edges = collector.build_edges(event_listener.drain())
+                    n = store.record_edges(host, edges, now=start)
                 else:
                     n = collector.poll_once(store, host, now=start)
                 log.debug("poll %d recorded %d edges", count, n)
@@ -412,6 +511,11 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
                     if events:
                         store.record_dns_events(host, [e.to_row() for e in events])
                         log.debug("recorded %d DNS events", len(events))
+                if sni_monitor is not None and not paused:
+                    sni_events = sni_monitor.drain()
+                    if sni_events:
+                        store.record_dns_events(host, [e.to_row() for e in sni_events])
+                        log.debug("recorded %d SNI events", len(sni_events))
             except (PermissionError, FileNotFoundError):
                 break
 
@@ -432,8 +536,12 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     except KeyboardInterrupt:
         log.info("collector interrupted; shutting down")
     finally:
+        if event_listener is not None:
+            event_listener.stop()
         if dns_monitor is not None:
             dns_monitor.stop()
+        if sni_monitor is not None:
+            sni_monitor.stop()
         store.finish_run(run_id)
         if config.html_report:
             from . import report as rp

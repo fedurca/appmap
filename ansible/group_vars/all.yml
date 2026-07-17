@@ -19,6 +19,11 @@ commatrix_dns_enabled: true
 commatrix_dns_enrich_flows: true
 # Optional NTP server for an active SNTP offset probe (empty = local daemon only).
 commatrix_ntp_check_server: ""
+# Capture mode (auto|events|poll) and network-namespace scope (auto|host-only|all).
+commatrix_capture_mode: "auto"
+commatrix_netns_scope: "auto"
+# Opt-in TLS ClientHello SNI capture (needs root/CAP_NET_RAW).
+commatrix_sni_enabled: false
 
 # --- control-node paths (pull + merge + report) --------------------------
 # Directory on the CONTROL node where snapshots, the merged DB and the report

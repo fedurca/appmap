@@ -248,8 +248,11 @@ flowchart LR
 
 ## Limitations
 
-- `nf_conntrack` is a snapshot; very short flows between polls can be missed
-  (use the `conntrack-events` source or a lower `poll_interval` to reduce this).
+- Snapshot polling of `nf_conntrack` can miss flows created *and* destroyed
+  between polls. Set `[capture] mode = auto` (default) to use the **event-driven
+  netlink conntrack listener** when running as root (pure stdlib, no
+  `conntrack-tools`): DESTROY events carry final counters so short flows are
+  captured. Falls back to polling otherwise.
 - Byte counts are a best-effort cumulative estimate, not exact accounting, and
   require `nf_conntrack_acct=1`.
 - Runs **unprivileged by default**: topology is always captured, but toggling
@@ -299,6 +302,26 @@ commatrix doh            # markdown posture report (exit 2 if DoH enabled anywhe
 Firefox enterprise policy (`DNSOverHTTPS`), and systemd-resolved `DNSOverTLS`,
 and the posture is also stored in host parameters and surfaced in the HTML
 report. "Enforced off" means a locked/managed policy users cannot override.
+
+Beyond posture, commatrix flags flows to **known DoH/DoT resolver endpoints**
+(Cloudflare/Google/Quad9/NextDNS/... in `signatures/doh_endpoints.json`) as
+`l7=doh:<provider>`/`dot:<provider>` and lists them under "Encrypted DNS to
+external resolver" in the security highlights - a DNS blind-spot signal even
+when the query content is invisible.
+
+Optionally, enable **SNI capture** (`[sni] enabled = true`, needs root /
+CAP_NET_RAW) to recover destination hostnames from the TLS ClientHello even when
+DNS is encrypted; the domain enriches the flow's `Domain` column. Encrypted
+Client Hello (ECH) hides the SNI (reported as `<ech>`).
+
+## Namespaces, containers and capture quality
+
+With `[capture] netns = auto` (default) and root, commatrix also reads container
+and other network namespaces via `/proc/<pid>/net/*`, tagging flows with
+`container_id`, `pod` (Kubernetes pod UID from the cgroup) and `netns`. Each
+host's report shows a **Capture quality** posture line (`exact` /
+`per-socket-tcp` / `topology-only`) so a SOC knows where byte counts are
+trustworthy.
 
 ## License
 

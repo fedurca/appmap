@@ -95,6 +95,19 @@ class Config:
     # the offset is read from the local sync daemon only (no network).
     ntp_check_server: Optional[str] = None
 
+    # [capture]
+    # Capture mode: auto (event-driven when a conntrack event source is
+    # available, else polling), events (force event-driven), poll (force polling).
+    capture_mode: str = "auto"
+    # Network-namespace scope: auto/all enumerate container/other netns via
+    # /proc/<pid>/net/* (needs root); host-only reads just the host namespace.
+    netns_scope: str = "auto"  # auto | host-only | all
+
+    # [sni]
+    sni_enabled: bool = False  # opt-in AF_PACKET TLS ClientHello SNI capture
+    sni_interface: Optional[str] = None  # None -> all interfaces
+    sni_ports: List[int] = field(default_factory=lambda: [443, 853])
+
     # [resources]
     cpu_budget_percent: float = 10.0  # max % of TOTAL compute (all cores)
     disk_budget_percent: float = 10.0  # max % of free disk the DB may use
@@ -187,6 +200,18 @@ def load_config(path: Optional[str] = None) -> Config:
     if parser.has_section("time"):
         sec = parser["time"]
         cfg.ntp_check_server = sec.get("ntp_check_server", cfg.ntp_check_server) or None
+
+    if parser.has_section("capture"):
+        sec = parser["capture"]
+        cfg.capture_mode = sec.get("mode", cfg.capture_mode)
+        cfg.netns_scope = sec.get("netns", cfg.netns_scope)
+
+    if parser.has_section("sni"):
+        sec = parser["sni"]
+        cfg.sni_enabled = sec.getboolean("enabled", cfg.sni_enabled)
+        cfg.sni_interface = sec.get("interface", cfg.sni_interface) or None
+        if "ports" in sec:
+            cfg.sni_ports = [int(p) for p in _split_list(sec["ports"]) if p.isdigit()]
 
     if parser.has_section("resources"):
         sec = parser["resources"]

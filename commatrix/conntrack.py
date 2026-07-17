@@ -562,6 +562,24 @@ def capture_backend(source: str = "auto") -> str:
     raise ValueError(f"unknown conntrack source: {effective!r}")
 
 
+def capture_quality(backend: str, accounting: bool) -> str:
+    """Describe the trustworthiness of byte data for a capture backend.
+
+    * ``exact``          -- conntrack accounting: real cumulative byte/packet
+      counters (procfs / conntrack-list / ct-netlink with acct enabled).
+    * ``per-socket-tcp`` -- sock_diag: real per-socket TCP byte counters (UDP
+      has none, that is inherent).
+    * ``topology-only``  -- no byte accounting available (socket tables, or a
+      conntrack backend with accounting disabled).
+    """
+
+    if backend in ("procfs", "conntrack-list", "ct-netlink"):
+        return "exact" if accounting else "topology-only"
+    if backend == "socket-diag":
+        return "per-socket-tcp"
+    return "topology-only"
+
+
 def read_proc_conntrack(path: str = PROC_CONNTRACK) -> List[ConntrackEntry]:
     """Read and parse the current ``/proc/net/nf_conntrack`` snapshot.
 

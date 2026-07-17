@@ -20,6 +20,9 @@ _SYSTEMD_UNIT_RE = re.compile(r"/([\w@.\-\\]+\.(?:service|scope|socket|mount|sli
 _DOCKER_RE = re.compile(r"docker[-/]([0-9a-f]{12,64})")
 _CRIO_RE = re.compile(r"crio-([0-9a-f]{12,64})")
 _LIBPOD_RE = re.compile(r"libpod-([0-9a-f]{12,64})")
+# Kubernetes pod UID in the kubepods cgroup path (dashes or underscores per the
+# cgroup driver): .../pod<uuid>/...
+_KUBE_POD_RE = re.compile(r"pod([0-9a-fA-F]{8}[-_][0-9a-fA-F]{4}[-_][0-9a-fA-F]{4}[-_][0-9a-fA-F]{4}[-_][0-9a-fA-F]{12}|[0-9a-fA-F]{32})")
 
 
 @dataclass
@@ -31,6 +34,7 @@ class ProcessInfo:
     unit: Optional[str] = None
     container_id: Optional[str] = None
     container_runtime: Optional[str] = None
+    pod: Optional[str] = None
     package: Optional[str] = None
     uid: Optional[int] = None
 
@@ -43,6 +47,7 @@ class ProcessInfo:
             "unit": self.unit,
             "container_id": self.container_id,
             "container_runtime": self.container_runtime,
+            "pod": self.pod,
             "package": self.package,
             "uid": self.uid,
         }
@@ -71,12 +76,13 @@ def _read_exe(pid: int, proc_root: str) -> str:
         return ""
 
 
-def _parse_cgroup(text: str) -> (Optional[str], Optional[str], Optional[str]):  # type: ignore[valid-type]
-    """Return (systemd_unit, container_id, container_runtime) from cgroup text."""
+def _parse_cgroup(text: str) -> (Optional[str], Optional[str], Optional[str], Optional[str]):  # type: ignore[valid-type]
+    """Return (systemd_unit, container_id, container_runtime, pod_uid) from cgroup text."""
 
     unit: Optional[str] = None
     container_id: Optional[str] = None
     runtime: Optional[str] = None
+    pod: Optional[str] = None
 
     for line in text.splitlines():
         # Format: hierarchy-ID:controller-list:cgroup-path
@@ -93,6 +99,10 @@ def _parse_cgroup(text: str) -> (Optional[str], Optional[str], Optional[str]):  
         elif _LIBPOD_RE.search(path):
             container_id, runtime = _LIBPOD_RE.search(path).group(1), "podman"  # type: ignore[union-attr]
 
+        pm = _KUBE_POD_RE.search(path)
+        if pm:
+            pod = pm.group(1).replace("_", "-")
+
         for m2 in _SYSTEMD_UNIT_RE.finditer(path):
             candidate = m2.group(1)
             # Prefer the most specific (last) service/scope, ignore slices.
@@ -100,7 +110,7 @@ def _parse_cgroup(text: str) -> (Optional[str], Optional[str], Optional[str]):  
                 continue
             unit = candidate
 
-    return unit, container_id, runtime
+    return unit, container_id, runtime, pod
 
 
 def _read_uid(pid: int, proc_root: str) -> Optional[int]:
@@ -167,7 +177,7 @@ def get_process_info(
     cmdline = _read_cmdline(os.path.join(base, "cmdline"))
     exe = _read_exe(pid, proc_root)
     cgroup_text = _read_text(os.path.join(base, "cgroup")) or ""
-    unit, container_id, runtime = _parse_cgroup(cgroup_text)
+    unit, container_id, runtime, pod = _parse_cgroup(cgroup_text)
     uid = _read_uid(pid, proc_root)
 
     package = _package_for_path(exe) if resolve_package else None
@@ -180,6 +190,7 @@ def get_process_info(
         unit=unit,
         container_id=container_id,
         container_runtime=runtime,
+        pod=pod,
         package=package,
         uid=uid,
     )

@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS flows (
     l7_protocol TEXT,
     data_quality TEXT,
     peer_domain TEXT,
+    pod TEXT,
+    netns TEXT,
     UNIQUE (host, proto, direction, local_ip, peer_ip, service_port)
 );
 
@@ -159,6 +161,8 @@ class EdgeObservation:
     l7_protocol: Optional[str] = None
     data_quality: Optional[str] = None
     peer_domain: Optional[str] = None
+    pod: Optional[str] = None
+    netns: Optional[str] = None
 
 
 class Store:
@@ -231,6 +235,10 @@ class Store:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(flows)")}
         if "peer_domain" not in cols:
             self.conn.execute("ALTER TABLE flows ADD COLUMN peer_domain TEXT")
+        if "pod" not in cols:
+            self.conn.execute("ALTER TABLE flows ADD COLUMN pod TEXT")
+        if "netns" not in cols:
+            self.conn.execute("ALTER TABLE flows ADD COLUMN netns TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -292,8 +300,8 @@ class Store:
                     last_snapshot_packets, first_seen, last_seen, last_active,
                     max_gap, observations, service_side, service_name,
                     process_comm, process_exe, unit, package, container_id,
-                    l7_protocol, data_quality, peer_domain
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    l7_protocol, data_quality, peer_domain, pod, netns
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     host, obs.proto, obs.direction, obs.local_ip, obs.peer_ip, obs.service_port,
@@ -301,7 +309,7 @@ class Store:
                     obs.snapshot_bytes, obs.snapshot_packets, now, now, now,
                     obs.service_side, obs.service_name, obs.process_comm, obs.process_exe,
                     obs.unit, obs.package, obs.container_id, obs.l7_protocol, obs.data_quality,
-                    obs.peer_domain,
+                    obs.peer_domain, obs.pod, obs.netns,
                 ),
             )
             self._append_event("new", host, obs, now, obs.snapshot_bytes, obs.snapshot_packets, 0.0)
@@ -357,7 +365,9 @@ class Store:
                 container_id=COALESCE(?, container_id),
                 l7_protocol=COALESCE(?, l7_protocol),
                 data_quality=?,
-                peer_domain=COALESCE(?, peer_domain)
+                peer_domain=COALESCE(?, peer_domain),
+                pod=COALESCE(?, pod),
+                netns=COALESCE(?, netns)
             WHERE host=? AND proto=? AND direction=? AND local_ip=? AND peer_ip=? AND service_port=?
             """,
             (
@@ -367,7 +377,7 @@ class Store:
                 obs.service_side, obs.service_name,
                 obs.process_comm, obs.process_exe,
                 obs.unit, obs.package, obs.container_id, obs.l7_protocol,
-                obs.data_quality, obs.peer_domain,
+                obs.data_quality, obs.peer_domain, obs.pod, obs.netns,
                 host, obs.proto, obs.direction, obs.local_ip, obs.peer_ip, obs.service_port,
             ),
         )
@@ -632,14 +642,14 @@ class Store:
                     last_snapshot_packets, first_seen, last_seen, last_active,
                     max_gap, observations, service_side, service_name,
                     process_comm, process_exe, unit, package, container_id,
-                    l7_protocol, data_quality, peer_domain
+                    l7_protocol, data_quality, peer_domain, pod, netns
                 ) VALUES (
                     :host, :proto, :direction, :local_ip, :peer_ip, :service_port,
                     :peer_class, :peer_name, :bytes, :packets, :last_snapshot_bytes,
                     :last_snapshot_packets, :first_seen, :last_seen, :last_active,
                     :max_gap, :observations, :service_side, :service_name,
                     :process_comm, :process_exe, :unit, :package, :container_id,
-                    :l7_protocol, :data_quality, :peer_domain
+                    :l7_protocol, :data_quality, :peer_domain, :pod, :netns
                 )
                 ON CONFLICT (host, proto, direction, local_ip, peer_ip, service_port)
                 DO UPDATE SET
@@ -662,7 +672,9 @@ class Store:
                     container_id=excluded.container_id,
                     l7_protocol=excluded.l7_protocol,
                     data_quality=excluded.data_quality,
-                    peer_domain=COALESCE(excluded.peer_domain, flows.peer_domain)
+                    peer_domain=COALESCE(excluded.peer_domain, flows.peer_domain),
+                    pod=COALESCE(excluded.pod, flows.pod),
+                    netns=COALESCE(excluded.netns, flows.netns)
                 """,
                 _flow_row_defaults(f),
             )
@@ -754,5 +766,6 @@ def _flow_row_defaults(f: Dict[str, object]) -> Dict[str, object]:
         "first_seen", "last_seen", "last_active", "max_gap", "observations",
         "service_side", "service_name", "process_comm", "process_exe", "unit",
         "package", "container_id", "l7_protocol", "data_quality", "peer_domain",
+        "pod", "netns",
     ]
     return {k: f.get(k) for k in keys}

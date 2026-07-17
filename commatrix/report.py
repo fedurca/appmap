@@ -33,7 +33,7 @@ MATRIX_COLUMNS = [
     "host", "direction", "local_ip", "service_port", "service_name", "l7_protocol",
     "peer_ip", "peer_name", "peer_domain", "peer_class", "bytes", "packets",
     "first_seen", "last_seen", "max_gap", "observations",
-    "process_comm", "unit", "package", "container_id", "data_quality",
+    "process_comm", "unit", "package", "container_id", "pod", "netns", "data_quality",
 ]
 
 
@@ -455,6 +455,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     for title, items in (
         ("External inbound exposure", security["external_inbound"]),
         ("Cleartext external protocols", security["cleartext_external"]),
+        ("Encrypted DNS to external resolver", security["encrypted_dns"]),
         ("Flows without byte accounting", security["no_accounting"]),
     ):
         if items:
@@ -467,9 +468,10 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
         else:
             sec_sections.append(f"<section><h3>{html.escape(title)}</h3><p>None observed.</p></section>")
 
-    # Posture per host (from stored host params): DoH + time synchronization.
+    # Posture per host (from stored host params): DoH + time + capture quality.
     doh_rows = []
     time_rows = []
+    quality_rows = []
     for h in store.list_hosts():
         params = store.get_host_params(h)
         doh_assessment = params.get("doh.assessment")
@@ -479,6 +481,18 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
             doh_rows.append(
                 f"<li><strong>{html.escape(str(h))}</strong>: "
                 f'<span style="color:{color}">{html.escape(str(doh_assessment))}</span></li>'
+            )
+        quality = params.get("capture.quality")
+        if quality is not None:
+            backend = params.get("capture.backend", "?")
+            acct = params.get("capture.accounting")
+            scope = params.get("capture.netns_scope", "?")
+            color = "#4ade80" if quality in ("exact", "per-socket-tcp") else "#fbbf24"
+            detail = f"backend={backend}, accounting={acct}, netns={scope}"
+            quality_rows.append(
+                f"<li><strong>{html.escape(str(h))}</strong>: "
+                f'<span style="color:{color}">{html.escape(str(quality))}</span> '
+                f'<span style="color:#94a3b8">({html.escape(detail)})</span></li>'
             )
         time_assessment = params.get("time.assessment")
         if time_assessment is not None:
@@ -505,6 +519,12 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
             f"<section><h3>Time synchronization</h3><ul>{''.join(time_rows)}</ul>"
             "<p style='color:#94a3b8;margin:.25rem 0 0'>Uptime/coverage and beacon "
             "stats rely on the clock; an unsynced or skewed clock corrupts them.</p></section>"
+        )
+    if quality_rows:
+        posture_parts.append(
+            f"<section><h3>Capture quality</h3><ul>{''.join(quality_rows)}</ul>"
+            "<p style='color:#94a3b8;margin:.25rem 0 0'>Where byte counts are "
+            "trustworthy (exact / per-socket) vs topology-only.</p></section>"
         )
     doh_top = (
         f'<section class="posture"><h2>Host posture</h2>{"".join(posture_parts)}</section>'
@@ -569,7 +589,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
       <div class="card"><div>Flows</div><div class="metric">{total_flows}</div></div>
       <div class="card"><div>Total traffic</div><div class="metric">{html.escape(human_bytes(total_bytes))}</div></div>
       <div class="card"><div>Hosts</div><div class="metric">{len(store.list_hosts())}</div></div>
-      <div class="card"><div>Security findings</div><div class="metric">{len(security['external_inbound']) + len(security['cleartext_external'])}</div></div>
+      <div class="card"><div>Security findings</div><div class="metric">{len(security['external_inbound']) + len(security['cleartext_external']) + len(security['encrypted_dns'])}</div></div>
       <div class="card"><div>First run</div><div class="metric" style="font-size:1.1rem">{html.escape(fmt_time(stats['first_run']))}</div></div>
       <div class="card"><div>Runs</div><div class="metric">{stats['run_count']}</div></div>
       <div class="card"><div>Total runtime</div><div class="metric" style="font-size:1.2rem">{html.escape(fmt_duration(stats['total_runtime']))}</div></div>
@@ -817,6 +837,7 @@ def security_highlights(store: Store) -> Dict[str, List[Dict[str, object]]]:
     external_inbound: List[Dict[str, object]] = []
     cleartext_external: List[Dict[str, object]] = []
     no_accounting: List[Dict[str, object]] = []
+    encrypted_dns: List[Dict[str, object]] = []
 
     for r in rows:
         l7 = str(r.get("l7_protocol") or "")
@@ -840,11 +861,15 @@ def security_highlights(store: Store) -> Dict[str, List[Dict[str, object]]]:
         # nf_conntrack "no accounting" case and the /proc socket-snapshot fallback.
         if r.get("data_quality") in ("no-accounting", "socket-snapshot"):
             no_accounting.append(summary)
+        # Encrypted DNS (DoH/DoT) to an external resolver: bypasses system DNS.
+        if l7.startswith("doh") or l7.startswith("dot"):
+            encrypted_dns.append(summary)
 
     return {
         "external_inbound": external_inbound,
         "cleartext_external": cleartext_external,
         "no_accounting": no_accounting,
+        "encrypted_dns": encrypted_dns,
     }
 
 
@@ -873,6 +898,13 @@ def security_markdown(store: Store) -> str:
         "Cleartext protocols with external peers",
         data["cleartext_external"],
         "Unencrypted protocols observed talking to external peers.",
+    )
+    section(
+        "Encrypted DNS to external resolver",
+        data["encrypted_dns"],
+        "Flows to known DoH/DoT resolvers - encrypted DNS that bypasses the "
+        "system resolver and DNS logging (content invisible). Enforce DoH off "
+        "for full DNS visibility.",
     )
     section(
         "Flows without byte accounting",

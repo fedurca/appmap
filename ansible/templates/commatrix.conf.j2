@@ -25,3 +25,10 @@ enrich_flows = {{ commatrix_dns_enrich_flows | string | lower }}
 {% if commatrix_ntp_check_server %}
 ntp_check_server = {{ commatrix_ntp_check_server }}
 {% endif %}
+
+[capture]
+mode = {{ commatrix_capture_mode }}
+netns = {{ commatrix_netns_scope }}
+
+[sni]
+enabled = {{ commatrix_sni_enabled | string | lower }}
