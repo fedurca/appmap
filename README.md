@@ -59,6 +59,28 @@ the required conntrack sysctls, installs the systemd unit **with a CPU quota of
 `UserParameter` file if an agent is present, and enables the service. Override
 budgets with `--cpu-percent N` / `--disk-percent N`.
 
+### One-shot: install as root, control as a user
+
+If you want the collector installed once as a **system** service (root) but be
+able to start/stop/inspect it as your normal user **without a root password**:
+
+```bash
+sudo ./packaging/install-service.sh            # controlling user defaults to $SUDO_USER
+sudo ./packaging/install-service.sh --user alice
+sudo ./packaging/install-service.sh --uninstall
+```
+
+It runs the system installer, then delegates control of **only** the
+`commatrix-collector.service` unit to that user via a scoped `sudoers` drop-in
+(and a polkit rule when polkit is present), and installs a `commatrix-ctl`
+wrapper:
+
+```bash
+commatrix-ctl status
+commatrix-ctl start | stop | restart
+commatrix-ctl logs | follow
+```
+
 ### Manual / pip
 
 ```bash
