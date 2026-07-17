@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import html
 import io
+import ipaddress
 import json
 import math
 import time
@@ -300,6 +301,114 @@ def _matrix_html_table(rows: List[Dict[str, object]], limit: int = 100) -> str:
     return "\n".join(lines)
 
 
+def _subnet_of(ip: str) -> str:
+    """Aggregate a peer IP to a /24 (IPv4) or /48 (IPv6) group label."""
+
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip or "unknown"
+    if addr.version == 4:
+        return str(ipaddress.ip_network(f"{ip}/24", strict=False))
+    return str(ipaddress.ip_network(f"{ip}/48", strict=False))
+
+
+def _flow_line_html(row: Dict[str, object]) -> str:
+    """One peer/flow line inside a collapsible group."""
+
+    domain = row.get("peer_domain") or row.get("peer_name")
+    svc = row.get("service_name") or row.get("service_port")
+    l7 = row.get("l7_protocol")
+    parts = [vt_peer_html(row)]
+    if domain:
+        parts.append(f'<span class="dom">{html.escape(str(domain))}</span>')
+    meta = f"{html.escape(str(svc or ''))}:{html.escape(str(row.get('service_port') or ''))}"
+    if l7:
+        meta += f" {html.escape(str(l7))}"
+    parts.append(f'<span class="meta">{meta}</span>')
+    parts.append(f'<span class="bytes">{html.escape(human_bytes(row.get("bytes")))}</span>')
+    seen = row.get("observations")
+    if seen:
+        parts.append(f'<span class="meta">×{html.escape(str(seen))}</span>')
+    return "<li>" + " · ".join(parts) + "</li>"
+
+
+def _details_group(summary_html: str, items_html: str, open_: bool = False) -> str:
+    op = " open" if open_ else ""
+    return f"<details{op}><summary>{summary_html}</summary>{items_html}</details>"
+
+
+def _topology_html(rows: List[Dict[str, object]], mermaid: str) -> str:
+    """Collapsible, groupable communication view (by process / by address).
+
+    The default view is aggregated: top-level groups are shown but their members
+    stay collapsed, so the section is a handful of lines instead of screens. The
+    full mermaid diagram is available in a collapsed drawer.
+    """
+
+    if not rows:
+        return "<p>No flows recorded.</p>"
+
+    def _sum_bytes(rs):
+        return sum(float(r.get("bytes") or 0) for r in rs)
+
+    # --- group by process ---
+    by_proc: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for r in rows:
+        by_proc[str(r.get("process_comm") or "unknown")].append(r)
+    proc_details = []
+    for proc in sorted(by_proc, key=lambda p: _sum_bytes(by_proc[p]), reverse=True):
+        prows = by_proc[proc]
+        peers = {str(r.get("peer_ip")) for r in prows}
+        summary = (
+            f'<strong>{html.escape(proc)}</strong> '
+            f'<span class="meta">{len(peers)} peers · {len(prows)} flows · '
+            f'{html.escape(human_bytes(_sum_bytes(prows)))}</span>'
+        )
+        items = "<ul>" + "".join(
+            _flow_line_html(r)
+            for r in sorted(prows, key=lambda x: float(x.get("bytes") or 0), reverse=True)
+        ) + "</ul>"
+        proc_details.append(_details_group(summary, items))
+
+    # --- group by peer address (/24 or /48) ---
+    by_net: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for r in rows:
+        by_net[_subnet_of(str(r.get("peer_ip")))].append(r)
+    net_details = []
+    for net in sorted(by_net, key=lambda n: _sum_bytes(by_net[n]), reverse=True):
+        nrows = by_net[net]
+        procs = {str(r.get("process_comm") or "unknown") for r in nrows}
+        summary = (
+            f'<strong>{html.escape(net)}</strong> '
+            f'<span class="meta">{len(nrows)} flows · {len(procs)} processes · '
+            f'{html.escape(human_bytes(_sum_bytes(nrows)))}</span>'
+        )
+        items = "<ul>" + "".join(
+            _flow_line_html(r)
+            for r in sorted(nrows, key=lambda x: float(x.get("bytes") or 0), reverse=True)
+        ) + "</ul>"
+        net_details.append(_details_group(summary, items))
+
+    return (
+        '<div class="grouping">'
+        + _details_group(
+            f'Grouped by process <span class="meta">({len(by_proc)})</span>',
+            "".join(proc_details),
+            open_=True,
+        )
+        + _details_group(
+            f'Grouped by peer address <span class="meta">({len(by_net)} subnets)</span>',
+            "".join(net_details),
+        )
+        + _details_group(
+            'Full topology diagram',
+            f'<pre class="mermaid">{mermaid}</pre>',
+        )
+        + "</div>"
+    )
+
+
 def _mermaid_body(store: Store) -> str:
     lines = topology_mermaid(store).strip().splitlines()
     if lines and lines[0].startswith("```"):
@@ -370,14 +479,15 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
             f"<li><strong>{html.escape(str(h))}</strong>: "
             f'<span style="color:{color}">{html.escape(str(assessment))}</span></li>'
         )
-    doh_section = (
-        f"<section><h3>DNS-over-HTTPS posture</h3><ul>{''.join(doh_rows)}</ul>"
-        "<p style='color:#94a3b8'>DoH lets apps bypass the system resolver and DNS "
-        "logging; enforce it off for full visibility.</p></section>"
+    doh_top = (
+        f'<section class="posture"><h2>DNS-over-HTTPS posture</h2><ul>{"".join(doh_rows)}</ul>'
+        "<p style='color:#94a3b8;margin:.25rem 0 0'>DoH lets apps bypass the system "
+        "resolver and DNS logging; enforce it off for full visibility.</p></section>"
         if doh_rows else ""
     )
 
     mermaid = _mermaid_body(store)
+    topology = _topology_html(rows, mermaid)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -405,6 +515,18 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     .note {{ background: #3f2d0b; border: 1px solid #a16207; color: #fde68a; border-radius: 10px; padding: .75rem 1rem; margin: 1rem 0; }}
     .note code {{ background: rgba(0,0,0,.35); padding: 0 .3rem; border-radius: 4px; }}
     a {{ color: #93c5fd; }}
+    .grouping details {{ border: 1px solid #334155; border-radius: 8px; margin: .4rem 0; background: #0f172a; }}
+    .grouping > details {{ background: #111827; }}
+    .grouping summary {{ cursor: pointer; padding: .5rem .75rem; user-select: none; }}
+    .grouping summary:hover {{ background: #1e293b; }}
+    .grouping details details {{ margin: .3rem .6rem; }}
+    .grouping ul {{ margin: .25rem 0 .5rem 1.25rem; padding: 0; }}
+    .grouping li {{ list-style: none; padding: .2rem 0; border-bottom: 1px solid #1f2937; }}
+    .grouping .meta {{ color: #94a3b8; font-size: .85em; }}
+    .grouping .dom {{ color: #a5b4fc; }}
+    .grouping .bytes {{ color: #4ade80; }}
+    .posture {{ background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: .75rem 1.25rem; margin: 1rem 0; }}
+    .posture li {{ margin: .2rem 0; }}
     footer {{ color: #94a3b8; border-top: 1px solid #334155; }}
   </style>
   <script type="module">
@@ -424,6 +546,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
       <div class="card"><div>Hosts</div><div class="metric">{len(store.list_hosts())}</div></div>
       <div class="card"><div>Security findings</div><div class="metric">{len(security['external_inbound']) + len(security['cleartext_external'])}</div></div>
     </section>
+    {doh_top}
     {banner}
 
     <h2>Traffic graphs</h2>
@@ -434,14 +557,14 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
       <div class="panel pie">{_svg_pie_chart("Direction mix", direction_items)}</div>
     </div>
 
-    <h2>Topology</h2>
-    <div class="panel"><pre class="mermaid">{mermaid}</pre></div>
+    <h2>Communication flow</h2>
+    <div class="panel">{topology}</div>
 
     <h2>Communication matrix</h2>
     <div class="panel">{_matrix_html_table(rows)}</div>
 
     <h2>Security highlights</h2>
-    <div class="panel">{''.join(sec_sections)}{doh_section}</div>
+    <div class="panel">{''.join(sec_sections)}</div>
   </main>
   <footer>Commatrix HTML report — stdlib collector, inline SVG charts</footer>
 </body>
