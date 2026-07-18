@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python packaging/version.py set "${{ needs.version.outputs.version }}"
@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
       - run: python packaging/version.py set "${{ needs.version.outputs.version }}"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -81,6 +81,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: false
+          sbom: false
           build-args: VERSION=${{ needs.version.outputs.version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/commatrix:${{ needs.version.outputs.version }}
@@ -93,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
@@ -110,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - uses: actions/setup-dotnet@v4
@@ -118,7 +120,10 @@ jobs:
       - run: python packaging/version.py set "${{ needs.version.outputs.version }}"
       - run: powershell -ExecutionPolicy Bypass -File packaging/windows/build_msi.ps1 -Version "${{ needs.version.outputs.version }}"
       - uses: actions/upload-artifact@v4
-        with: { name: msi, path: dist/*.msi }
+        with:
+          name: msi
+          path: dist/*.msi
+          if-no-files-found: error
 
   snap:
     needs: version
@@ -127,7 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
       - run: python3 packaging/version.py set "${{ needs.version.outputs.version }}"
       - uses: snapcore/action-build@v1
         id: snapcraft
@@ -144,7 +149,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: commatrix.flatpak
@@ -160,7 +165,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || needs.version.outputs.tag }}
       - uses: anchore/sbom-action@v0
         with:
           path: .
@@ -174,8 +179,14 @@ jobs:
     if: ${{ always() && needs.version.result == 'success' && needs.sdist-wheel.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with: { path: artifacts }
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "{dist,appimage,msi,snap,flatpak,sbom}"
+          merge-multiple: true
+          path: artifacts
+          # Optional package jobs may be missing (continue-on-error).
+        continue-on-error: true
       - name: Collect and checksum
         run: |
           mkdir -p release
@@ -183,7 +194,7 @@ jobs:
               -name '*.AppImage' -o -name '*.msi' -o -name '*.snap' \
               -o -name '*.flatpak' -o -name '*.whl' -o -name '*.tar.gz' \
               -o -name '*.cdx.json' \
-            \) -exec cp -n {} release/ \; || true
+            \) -exec cp -n {} release/ \; 2>/dev/null || true
           n=$(find release -type f | wc -l)
           echo "Collected $n artifact file(s):"
           ls -la release || true
