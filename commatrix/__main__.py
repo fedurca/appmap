@@ -116,8 +116,26 @@ def cmd_install_windows(args: argparse.Namespace) -> int:
             fh.write("[collector]\ndatabase = %s\n" % os.path.join(data_dir, "commatrix.db"))
         _platform.secure_permissions(conf)
 
-    ok = runtime.install_service(conf)
+    ok = runtime.install_service(conf, command=getattr(args, "task_command", None))
     log.info("windows service %s", "installed and started" if ok else "installation FAILED")
+    return 0 if ok else 1
+
+
+def cmd_uninstall_windows(args: argparse.Namespace) -> int:
+    """Remove the Windows startup task (leaves config/data in place)."""
+
+    from . import platform as _platform
+    log = logging.getLogger("commatrix")
+    if not _platform.IS_WINDOWS:
+        log.error("uninstall-windows is only for Windows hosts")
+        return 1
+    from .platform.win import runtime
+
+    if not runtime.is_admin():
+        log.error("uninstall-windows requires Administrator privileges")
+        return 1
+    ok = runtime.uninstall_service()
+    log.info("windows service %s", "removed" if ok else "removal reported an error")
     return 0 if ok else 1
 
 
@@ -416,7 +434,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_winsvc = sub.add_parser("install-windows", help="install as a Windows startup task (SYSTEM)")
     _add_common(p_winsvc)
+    p_winsvc.add_argument("--task-command", help="override the scheduled-task action (SCCM bundled-Python launcher)")
     p_winsvc.set_defaults(func=cmd_install_windows)
+
+    p_winunsvc = sub.add_parser("uninstall-windows", help="remove the Windows startup task")
+    _add_common(p_winunsvc)
+    p_winunsvc.set_defaults(func=cmd_uninstall_windows)
 
     p_restore = sub.add_parser(
         "restore-sysctls",

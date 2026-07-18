@@ -47,14 +47,19 @@ def running_as_service() -> bool:
     return _session_id() == 0
 
 
-def install_service(config_path: str, python_exe: str = None, run_as_root: bool = True) -> bool:
+def install_service(config_path: str, python_exe: str = None, run_as_root: bool = True,
+                    command: str = None) -> bool:
     """Register a startup scheduled task running the collector as SYSTEM.
 
     Equivalent to installing+enabling the systemd unit. Requires admin.
+
+    ``command`` overrides the task action - used by the SCCM package to point at
+    a bundled-Python launcher (a .cmd that sets PYTHONPATH), so no system-wide
+    Python or pip install is required on the target.
     """
 
     python_exe = python_exe or sys.executable
-    cmd = f'"{python_exe}" -m commatrix collect --config "{config_path}"'
+    cmd = command or f'"{python_exe}" -m commatrix collect --config "{config_path}"'
     args = [
         "schtasks", "/create", "/tn", TASK_NAME,
         "/tr", cmd, "/sc", "onstart", "/rl", "highest", "/f",
