@@ -43,6 +43,20 @@ sudo commatrix elevate-linux --revoke
 python -m commatrix elevate-windows --revoke
 ```
 
+## Výstupy k nasazení (balíčky)
+
+Hotové artefakty z CI/CD (wheel, AppImage, MSI, Snap, Flatpak, SBOM, `SHA256SUMS`)
+jsou u **GitHub Releases**:
+
+- **Nejnovější verze:** https://github.com/fedurca/appmap/releases/latest
+- Všechny verze: https://github.com/fedurca/appmap/releases
+
+Docker image: `ghcr.io/fedurca/commatrix:latest` (a tag `ghcr.io/fedurca/commatrix:<verze>`).
+
+Release vznikne po pushi tagu `vX.Y.Z` (workflow [`.github/workflows/release.yml`](.github/workflows/release.yml)).
+Dokud release neexistuje, stáhněte zdroj z `main` a použijte `./install.sh` /
+`install-windows`.
+
 ## Model capture
 
 **Linux:** jádro už spoje sleduje. Čtení `/proc/net/nf_conntrack` (nebo

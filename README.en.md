@@ -45,6 +45,20 @@ sudo commatrix elevate-linux --revoke
 python -m commatrix elevate-windows --revoke
 ```
 
+## Deployment artifacts
+
+Built packages from CI/CD (wheel, AppImage, MSI, Snap, Flatpak, SBOM, `SHA256SUMS`)
+are published on **GitHub Releases**:
+
+- **Latest release:** https://github.com/fedurca/appmap/releases/latest
+- All releases: https://github.com/fedurca/appmap/releases
+
+Docker image: `ghcr.io/fedurca/commatrix:latest` (and `ghcr.io/fedurca/commatrix:<version>`).
+
+A release is created when you push a `vX.Y.Z` tag (workflow
+[`.github/workflows/release.yml`](.github/workflows/release.yml)). Until then,
+clone `main` and use `./install.sh` / `install-windows`.
+
 ## Capture model
 
 **Linux:** the kernel already tracks connections. Reading
