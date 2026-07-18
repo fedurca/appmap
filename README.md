@@ -1,27 +1,37 @@
 # Commatrix
 
-Commatrix is a **standard-library-only** Python tool for Linux servers (typically
-running a Zabbix agent) that maps network communication using `nf_conntrack`
-instead of packet capture (`tcpdump`/libpcap). It collects flow data on many
-VMs, attributes each flow to the **application/process** that produced it,
-enriches it with **Zabbix host parameters**, and aggregates everything into a
+Commatrix is a **standard-library-only** Python tool for **Linux and Windows**
+that maps network communication using host-native APIs instead of packet
+capture (`tcpdump`/libpcap). It collects flow data on many hosts, attributes
+each flow to the **application/process** that produced it, optionally enriches
+it with **Zabbix host parameters**, and aggregates everything into a
 **communication matrix** and an **application catalog** with ready-to-use
-documentation exports.
+documentation exports. Linux and Windows snapshots share the same schema and
+merge into one fleet report.
 
-## Why nf_conntrack?
+## Capture model
 
-The kernel already tracks connections. Reading `/proc/net/nf_conntrack` gives us
-source, destination, port, protocol and (with accounting enabled) byte/packet
-counters without any capture library or elevated packet-sniffing. Commatrix
-polls this table, folds ephemeral client ports into stable *service edges*, and
-maintains, per edge:
+**Linux:** the kernel already tracks connections. Reading
+`/proc/net/nf_conntrack` (or the event-driven netlink listener) gives source,
+destination, port, protocol and (with accounting enabled) byte/packet counters
+without any capture library. When conntrack is absent, Commatrix uses
+**`sock_diag`** (same source as `ss -i`) for per-socket TCP counts, then falls
+back to `/proc/net/{tcp,udp}` (topology only).
+
+**Windows:** IP Helper (`GetExtendedTcpTable`) owns the connection table and
+PID attribution; TCP ESTATS provides best-effort byte counts. DNS-Client events,
+registry DoH posture, and optional raw-socket SNI mirror the Linux feature set
+(see [Windows Server](#windows-server)).
+
+On both platforms Commatrix folds ephemeral client ports into stable *service
+edges* and maintains, per edge:
 
 - source, destination, service port, protocol, direction
 - cumulative bytes / packets (best-effort estimate from snapshot deltas)
 - `first_seen`, `last_seen`
 - `max_gap` — the **longest idle interval between two communications**
 
-### Required kernel settings
+### Required Linux kernel settings
 
 Byte/packet accounting and flow timestamps are off on many distros. Enable them
 (the systemd unit does this automatically):
@@ -31,18 +41,40 @@ sysctl -w net.netfilter.nf_conntrack_acct=1
 sysctl -w net.netfilter.nf_conntrack_timestamp=1
 ```
 
-Reading `/proc/net/nf_conntrack` and `/proc/<pid>/fd` requires **root**.
+Reading `/proc/net/nf_conntrack` and `/proc/<pid>/fd` for other users requires
+**root** (or matching capabilities).
 
 ## Requirements
 
-- Linux with the `nf_conntrack` module loaded (RHEL 8+, Ubuntu 20.04+ base images).
-- Python 3.9+ (standard library only — no pip dependencies).
-- No extra packages required. When `/proc/net/nf_conntrack` is absent commatrix
-  automatically uses the **`sock_diag` netlink** interface (the same source as
-  `ss -i`) to get *real per-socket TCP byte/packet counts with no install and
-  no root*; if even that is unavailable it falls back to `/proc/net/{tcp,udp}`
-  (topology only, zero bytes). Optional: `conntrack-tools` if already shipped by
-  the distro, or a Zabbix agent (`zabbix_get`/`zabbix_sender`) for host params.
+| | Linux | Windows |
+|---|---|---|
+| Runtime | Python 3.9+ (stdlib only) | Python 3.9+ (stdlib only; `ctypes` / `winreg`) |
+| Capture source | `nf_conntrack` / sock_diag / `/proc` | IP Helper + TCP ESTATS |
+| Full capture privileges | root or `CAP_NET_ADMIN` (+ `CAP_NET_RAW` for SNI) | Administrator / SYSTEM scheduled task |
+| Unprivileged | topology (limited process attribution) | limited connection table |
+| Optional | Zabbix agent (`zabbix_get` / `zabbix_sender`) | SCCM / Ansible WinRM for fleet deploy |
+
+## Deployment options
+
+| Method | Platform | What you get | Limits |
+|---|---|---|---|
+| **`./install.sh`** → systemd unit | Linux | Collector service, config, resource caps, optional Zabbix UserParameter | Full capture (conntrack sysctls, other users' PIDs, DNS monitor, SNI, netns) needs root/`--as-root` or matching caps; unprivileged = topology-oriented |
+| **`packaging/install-service.sh`** | Linux | System install + user control via scoped sudoers/`commatrix-ctl` | Same privilege model as `install.sh`; control delegation is for the unit only |
+| **`pip install .` / run from source** | Linux, Windows | CLI (`collect`, `report`, `aggregate`, …) | No auto-start unless you add a unit/task yourself |
+| **`python -m commatrix install-windows`** | Windows | Scheduled task as SYSTEM, data under ProgramData | Needs Administrator to install; byte counts are best-effort ESTATS; SNI needs Admin + `[sni] enabled` |
+| **MSI** (`packaging/windows/`, CI release) | Windows | Installer for SCCM / manual deploy | Same runtime limits as `install-windows`; build needs WiX + Python on the build host |
+| **SCCM Script Installer** (`packaging/windows/sccm/`) | Windows | Fleet push via ConfigMgr | Depends on SCCM reachability and how Python/runtime is bundled |
+| **Ansible** (`ansible/deploy.yml`, `deploy_windows.yml`, `pull_and_report.yml`) | Linux + Windows | Deploy collector, pull DBs, aggregate HTML | SSH (Linux) / WinRM (Windows); central node must reach inventory |
+| **Docker / GHCR** (`Dockerfile`, CI) | Linux containers | Reproducible CLI + report tooling | Live host capture needs **privileged + host network** (or matching caps); otherwise use mounted DBs for report/aggregate only |
+| **AppImage** (CI release) | Linux | Single-file binary, no package install | Still needs root/caps for privileged collect; not a substitute for systemd on fleets |
+| **Snap** (`snapcraft.yaml`, classic) | Linux | Distro-agnostic package | Classic confinement; strict confinement cannot usefully see host `/proc`/conntrack |
+| **Flatpak** (`packaging/flatpak/`) | Linux desktop | Sandboxed CLI for **report / aggregate** | **Not for live capture** — sandbox blocks conntrack/proc/netns; use on exported DBs/JSON |
+| **One-shot `collect` / `report`** | Linux, Windows | Ad-hoc matrix without a service | Misses flows between runs; use a timer/task for continuous coverage |
+
+**Privilege summary:** unprivileged collect still builds a useful topology.
+Exact byte accounting, DNS monitor, SNI, container/netns walk, and toggling
+conntrack sysctls need elevated rights (Linux capabilities/root, or Windows
+Administrator/SYSTEM).
 
 ## Install
 
