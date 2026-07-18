@@ -9,7 +9,7 @@
   <Package Name="Commatrix"
            Manufacturer="Commatrix contributors"
            Version="$(var.Version)"
-           UpgradeCode="7d3f6a4e-2c1b-4e2a-9f10-commatrix001"
+           UpgradeCode="7d3f6a4e-2c1b-4e2a-9f10-c0ffee71c001"
            Scope="perMachine"
            Compressed="yes">
 

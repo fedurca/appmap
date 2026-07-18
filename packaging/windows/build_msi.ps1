@@ -37,9 +37,18 @@ if (-not (Test-Path (Join-Path $pyDir "python.exe"))) {
 }
 
 # 3) Compile the MSI with a pinned WiX toolset (no OSMF gate).
-dotnet tool uninstall --global wix 2>$null
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+dotnet tool uninstall --global wix 2>&1 | Out-Null
+$ErrorActionPreference = $prevEap
 dotnet tool install --global wix --version $WixVersion
 if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix@$WixVersion failed" }
+
+# Ensure the global tools folder is on PATH for this session.
+$dotnetTools = Join-Path $env:USERPROFILE ".dotnet\tools"
+if (Test-Path $dotnetTools) {
+    $env:PATH = "$dotnetTools;$env:PATH"
+}
 
 $msi = Join-Path $Out "commatrix-$Version-x64.msi"
 if (Test-Path $msi) { Remove-Item -Force $msi }
