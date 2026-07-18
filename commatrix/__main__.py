@@ -17,6 +17,9 @@ Subcommands:
 * ``time``        -- report time-sync posture and clock offset (NTP accuracy).
 * ``restore-sysctls`` -- restore nf_conntrack sysctls from the persisted state
   file (used by the systemd ExecStopPost hook / crash recovery).
+* ``elevate-linux`` -- grant ambient capabilities + polkit DNS to the service
+  account (least privilege; no root path).
+* ``elevate-windows`` -- dedicated service user + Event Log / SeDebug (no Admin).
 """
 
 from __future__ import annotations
@@ -129,14 +132,63 @@ def cmd_uninstall_windows(args: argparse.Namespace) -> int:
     if not _platform.IS_WINDOWS:
         log.error("uninstall-windows is only for Windows hosts")
         return 1
-    from .platform.win import runtime
+    from .platform.win import elevate, runtime
 
     if not runtime.is_admin():
         log.error("uninstall-windows requires Administrator privileges")
         return 1
+    # Best-effort revoke of elevate-windows grants before deleting the task.
+    try:
+        rev = elevate.revoke_elevate(dry_run=False)
+        for line in rev.actions:
+            log.info("elevate revoke: %s", line)
+        for line in rev.warnings:
+            log.warning("elevate revoke: %s", line)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("elevate-windows revoke skipped: %s", exc)
     ok = runtime.uninstall_service()
     log.info("windows service %s", "removed" if ok else "removal reported an error")
     return 0 if ok else 1
+
+
+def cmd_elevate_linux(args: argparse.Namespace) -> int:
+    from . import platform as _platform
+    from .elevate_linux import DEFAULT_STATE_FILE, apply_elevate, revoke_elevate
+
+    log = logging.getLogger("commatrix")
+    if not _platform.IS_LINUX:
+        log.error("elevate-linux is only for Linux hosts")
+        return 1
+    state = args.state_file or DEFAULT_STATE_FILE
+    if args.revoke:
+        result = revoke_elevate(state_file=state, dry_run=args.dry_run)
+    else:
+        result = apply_elevate(state_file=state, dry_run=args.dry_run)
+    _write_output(result.summary_markdown(), args.output)
+    return 0 if result.ok else 1
+
+
+def cmd_elevate_windows(args: argparse.Namespace) -> int:
+    from . import platform as _platform
+
+    log = logging.getLogger("commatrix")
+    if not _platform.IS_WINDOWS:
+        log.error("elevate-windows is only for Windows hosts")
+        return 1
+    from .platform.win import elevate
+
+    if args.revoke:
+        result = elevate.revoke_elevate(
+            state_file=args.state_file, dry_run=args.dry_run,
+        )
+    else:
+        result = elevate.apply_elevate(
+            state_file=args.state_file,
+            dry_run=args.dry_run,
+            config_path=args.config,
+        )
+    _write_output(result.summary_markdown(), args.output)
+    return 0 if result.ok else 1
 
 
 def cmd_restore_sysctls(args: argparse.Namespace) -> int:
@@ -440,6 +492,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_winunsvc = sub.add_parser("uninstall-windows", help="remove the Windows startup task")
     _add_common(p_winunsvc)
     p_winunsvc.set_defaults(func=cmd_uninstall_windows)
+
+    p_elev_l = sub.add_parser(
+        "elevate-linux",
+        help="grant ambient caps + polkit DNS to the service user (no root path)",
+    )
+    _add_common(p_elev_l)
+    p_elev_l.add_argument("--revoke", action="store_true", help="restore previous privileges")
+    p_elev_l.add_argument("--dry-run", action="store_true", help="show actions without changing the host")
+    p_elev_l.add_argument("--state-file", help="path to elevate state JSON")
+    p_elev_l.add_argument("-o", "--output", help="write markdown summary to file")
+    p_elev_l.set_defaults(func=cmd_elevate_linux)
+
+    p_elev_w = sub.add_parser(
+        "elevate-windows",
+        help="dedicated service user + Event Log/SeDebug (no Administrators)",
+    )
+    _add_common(p_elev_w)
+    p_elev_w.add_argument("--revoke", action="store_true", help="restore previous privileges")
+    p_elev_w.add_argument("--dry-run", action="store_true", help="show actions without changing the host")
+    p_elev_w.add_argument("--state-file", help="path to elevate state JSON")
+    p_elev_w.add_argument("-o", "--output", help="write markdown summary to file")
+    p_elev_w.set_defaults(func=cmd_elevate_windows)
 
     p_restore = sub.add_parser(
         "restore-sysctls",

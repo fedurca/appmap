@@ -17,16 +17,38 @@ IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
 
 
+# Linux capability bit numbers (uapi/linux/capability.h).
+_CAP_DAC_READ_SEARCH = 2
+_CAP_NET_ADMIN = 12
+
+
+def _linux_has_effective_caps(*caps: int) -> bool:
+    """True if CapEff in /proc/self/status includes all given capability bits."""
+
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("CapEff:"):
+                    mask = int(line.split(":", 1)[1].strip(), 16)
+                    return all(mask & (1 << c) for c in caps)
+    except (OSError, ValueError):
+        pass
+    return False
+
+
 def is_privileged() -> bool:
     """True if running with the privileges needed for full capture.
 
-    Linux: root (euid 0). Windows: member of the Administrators group / elevated.
+    Linux: root (euid 0) **or** effective CAP_DAC_READ_SEARCH + CAP_NET_ADMIN
+    (the elevate-linux ambient set). Windows: Administrators / elevated token.
     """
 
     if IS_WINDOWS:
         from .win import runtime
         return runtime.is_admin()
-    return hasattr(os, "geteuid") and os.geteuid() == 0
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return True
+    return _linux_has_effective_caps(_CAP_DAC_READ_SEARCH, _CAP_NET_ADMIN)
 
 
 def running_as_service() -> bool:

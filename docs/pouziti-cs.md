@@ -59,24 +59,26 @@ commatrix-ctl status | start | stop | restart | logs | follow
 ```
 
 Volby: `--user JMENO` (řídící uživatel), `--as-root` (běh pod rootem – nutné pro
-DNS log a plnou atribuci), jinak běží pod neprivilegovaným účtem `commatrix`
-s capabilitami `CAP_NET_ADMIN`/`CAP_DAC_READ_SEARCH`.
+jistotu SNI a když polkit není k dispozici). Doporučený least-privilege postup
+bez rootu: po instalaci spusťte `sudo commatrix elevate-linux` (ambient caps +
+polkit DNS). Podrobnosti: [`elevace-cs.md`](elevace-cs.md).
 
 ### 3.2 Přímá instalace služby
 
 ```bash
 sudo ./install.sh                 # systémová služba (systemd)
-sudo ./install.sh --as-root       # běh pod rootem (DNS log, plná atribuce)
-sudo ./install.sh --uninstall     # odebrat
+sudo ./install.sh --as-root       # běh pod rootem (režim 3)
+sudo commatrix elevate-linux      # režim 2: max bez rootu
+sudo ./install.sh --uninstall     # odebrat (+ revoke elevate)
 ```
 
 ### 3.3 Privilegia (co která úroveň umí)
 
-| Úroveň | Topologie | Byte county | Procesy jiných uživatelů | DNS log |
-|---|---|---|---|---|
-| neprivilegovaně | ano | ano (sock_diag, TCP) | ne | ne |
-| capabilities | ano | ano | ano | ne |
-| root | ano | ano | ano | ano |
+| Úroveň | Topologie | Byte county | Procesy jiných uživatelů | DNS log | SNI / netns |
+|---|---|---|---|---|---|
+| pod uživatelem | ano | omezeně (sock_diag) | ne | ne | ne |
+| elevate-linux (caps + polkit) | ano | ano | ano | ano | ano |
+| root (`--as-root`) | ano | ano | ano | ano | ano |
 
 ---
 
@@ -88,11 +90,15 @@ Předpoklad: nainstalovaný Python 3.9+ a balíček commatrix (`pip install .`).
 
 ```powershell
 python -m commatrix install-windows
+python -m commatrix elevate-windows   # režim 2: dedicated user, bez Administrators
 ```
 
-Zaregistruje **startup úlohu pod SYSTEM** (obdoba systemd unitu), vytvoří a
-zabezpečí `%ProgramData%\commatrix\` (ACL: SYSTEM + Administrators) a spustí
-sběr. Odebrání:
+`install-windows` zaregistruje startup task jako SYSTEM, vytvoří
+`%ProgramData%\commatrix\`. `elevate-windows` ho přepíše na účet `commatrix`
+(Event Log Readers, SeDebug pokud jde, ACL SYSTEM+commatrix). **SNI zůstává u
+režimu 3 (Admin/SYSTEM).** Podrobnosti: [`elevace-cs.md`](elevace-cs.md).
+
+Odebrání (včetně revoke elevate):
 
 ```powershell
 python -m commatrix uninstall-windows

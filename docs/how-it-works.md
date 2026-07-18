@@ -129,10 +129,10 @@ IPs. Also `commatrix history` (IR timeline), `dns`, `doh`, `time`, `diff`.
 - **Service:** systemd unit (Linux) or a SYSTEM startup task (Windows,
   `install-windows`). On Linux it enables `nf_conntrack` accounting only for the
   run and **restores the host on exit** (crash-safe via a persisted state file).
-- **Least privilege:** runs unprivileged by default (topology + per-socket bytes
-  still work); full byte accounting, event capture, cross-user/namespace
-  attribution and DNS logging need root/Administrator (or the documented
-  capabilities). Data at rest is restricted (0640 / NTFS ACL).
+- **Least privilege:** three modes — plain user, elevated service account
+  (`elevate-linux` / `elevate-windows`), or root/SYSTEM. See
+  [`elevation-en.md`](elevation-en.md) / [`elevace-cs.md`](elevace-cs.md).
+  Data at rest is restricted (0640 / NTFS ACL).
 
 ## Centralization
 

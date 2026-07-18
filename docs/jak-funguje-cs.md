@@ -70,7 +70,8 @@ portu.
 ## Viditelnost DNS
 
 - **Log DNS dotazů** (append-only `dns_events`): Linux ze systemd-resolved
-  monitoru (varlink), Windows z DNS-Client kanálu. Vyžaduje root/Administrator.
+  monitoru (varlink), Windows z DNS-Client kanálu. Vyžaduje privileges
+  (`elevate-linux` / `elevate-windows` nebo root/Administrator).
 - **Obohacení toků:** odpovědní IP se mapují zpět na dotazované jméno –
   samostatný sloupec `Domain` vedle IP.
 - **DoH posture** ([`dohcheck.py`](../commatrix/dohcheck.py) /
@@ -127,8 +128,9 @@ county) s prokliky na VirusTotal. Dále `commatrix history`, `dns`, `doh`, `time
   stav).
 - **Nejnižší privilegia:** ve výchozím stavu běží neprivilegovaně (topologie +
   per-socket byty fungují); plný accounting, event capture, atribuce cizích
-  procesů/namespaců a DNS log vyžadují root/Administrator (nebo dokumentované
-  capabilities). Data na disku jsou omezená (0640 / NTFS ACL).
+  procesů/namespaců a DNS log vyžadují elevate (`elevate-linux` /
+  `elevate-windows`) nebo root/Administrator. Viz [`elevace-cs.md`](elevace-cs.md).
+  Data na disku jsou omezená (0640 / NTFS ACL).
 
 ## Centralizace
 

@@ -88,11 +88,23 @@ have_systemd() { command -v systemctl >/dev/null 2>&1; }
 # --- uninstall -----------------------------------------------------------
 if [ "$UNINSTALL" -eq 1 ]; then
   log "uninstalling (mode: $([ "$USER_MODE" -eq 1 ] && echo user || echo system))"
+  # Best-effort revoke of elevate-linux grants (restores drop-in/polkit from state).
+  if [ "$USER_MODE" -eq 0 ] && [ "$(id -u)" -eq 0 ]; then
+    if [ -x "$WRAPPER" ]; then
+      "$WRAPPER" elevate-linux --revoke 2>/dev/null \
+        || warn "elevate-linux --revoke reported an error (continuing uninstall)"
+    elif [ -d "$LIBROOT/commatrix" ]; then
+      env PYTHONPATH="$LIBROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m commatrix \
+        elevate-linux --revoke 2>/dev/null \
+        || warn "elevate-linux --revoke reported an error (continuing uninstall)"
+    fi
+  fi
   if have_systemd; then
     "${SYSTEMCTL[@]}" disable --now commatrix-collector.service 2>/dev/null || true
   fi
   rm -f "$UNITDIR/commatrix-collector.service"
   rm -rf "$UNITDIR/commatrix-collector.service.d"
+  rm -f /etc/polkit-1/rules.d/50-commatrix-resolved.rules
   rm -f "$WRAPPER"
   rm -rf "$LIBROOT"
   [ "$USER_MODE" -eq 0 ] && rm -f /etc/sysctl.d/99-commatrix-conntrack.conf || true
