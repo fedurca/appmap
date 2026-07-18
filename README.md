@@ -33,6 +33,16 @@ sudo commatrix elevate-linux
 python -m commatrix elevate-windows
 ```
 
+Revokace (obnoví předchozí stav; při uninstall běží automaticky):
+
+```bash
+# Linux
+sudo commatrix elevate-linux --revoke
+
+# Windows (jako Administrator)
+python -m commatrix elevate-windows --revoke
+```
+
 ## Model capture
 
 **Linux:** jádro už spoje sleduje. Čtení `/proc/net/nf_conntrack` (nebo

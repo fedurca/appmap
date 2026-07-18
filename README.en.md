@@ -35,6 +35,16 @@ sudo commatrix elevate-linux
 python -m commatrix elevate-windows
 ```
 
+Revoke (restores the previous state; also runs automatically on uninstall):
+
+```bash
+# Linux
+sudo commatrix elevate-linux --revoke
+
+# Windows (as Administrator)
+python -m commatrix elevate-windows --revoke
+```
+
 ## Capture model
 
 **Linux:** the kernel already tracks connections. Reading
