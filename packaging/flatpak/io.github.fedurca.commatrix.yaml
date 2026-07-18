@@ -1,0 +1,26 @@
+# Flatpak manifest for commatrix.
+#
+# IMPORTANT LIMITATION: Flatpak runs inside a sandbox with no privileged access
+# to the host network namespace, /proc/net/nf_conntrack or other processes, so
+# the *collector* cannot capture host traffic from within Flatpak. This bundle
+# is therefore intended for the OFFLINE side of commatrix - `report`, `aggregate`
+# and `diff` over snapshots collected elsewhere. For host capture use the
+# distro/systemd install, the AppImage (with sudo), Docker or Snap.
+#
+# Build:  flatpak-builder --force-clean build packaging/flatpak/io.github.fedurca.commatrix.yaml
+#         flatpak build-bundle <repo> commatrix.flatpak io.github.fedurca.commatrix
+app-id: io.github.fedurca.commatrix
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+command: commatrix
+finish-args:
+  - --filesystem=home        # read snapshots / write reports the user points to
+modules:
+  - name: commatrix
+    buildsystem: simple
+    build-commands:
+      - pip3 install --no-index --prefix=/app .
+    sources:
+      - type: dir
+        path: ../..

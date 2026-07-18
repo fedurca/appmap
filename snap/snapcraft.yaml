@@ -1,0 +1,30 @@
+name: commatrix
+base: core22
+adopt-info: commatrix
+summary: Network communication matrix and application catalog (stdlib-only)
+description: |
+  commatrix observes network flows via the kernel's own facilities
+  (nf_conntrack / netlink / procfs), attributes them to the owning process and
+  aggregates a communication matrix, application catalog and security highlights.
+
+  Note on confinement: the collector needs broad host visibility
+  (/proc/net/nf_conntrack, netlink, other processes), which strict-mode
+  interfaces do not fully allow, so this snap uses CLASSIC confinement. Classic
+  snaps require manual store review to publish; for internal use install the
+  built .snap with:  snap install --dangerous --classic commatrix_*.snap
+  The report/aggregate subcommands work without any special privileges.
+license: GPL-3.0-or-later
+confinement: classic
+grade: stable
+
+parts:
+  commatrix:
+    plugin: python
+    source: .
+    override-pull: |
+      craftctl default
+      craftctl set version="$(python3 packaging/version.py get)"
+
+apps:
+  commatrix:
+    command: bin/commatrix

@@ -2,7 +2,9 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
+from commatrix import resources as rsrc
 from commatrix.resources import DiskStatus, ResourceGovernor
 from commatrix.store import EdgeObservation, Store
 
@@ -10,6 +12,11 @@ from commatrix.store import EdgeObservation, Store
 class GovernorCpuTest(unittest.TestCase):
     def setUp(self):
         self.gov = ResourceGovernor(cpu_budget=0.10, ncpu=4, min_interval=1.0)
+        # Pin load average low so the (host-dependent) load backoff does not make
+        # these assertions flaky under CI/build load.
+        patcher = mock.patch.object(rsrc.os, "getloadavg", return_value=(0.0, 0.0, 0.0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_light_poll_respects_base_interval(self):
         # 0.4 CPU-seconds over 4 cores at 10% => required cycle 1.0s < base 5s.
@@ -20,7 +27,7 @@ class GovernorCpuTest(unittest.TestCase):
     def test_heavy_poll_extends_cycle(self):
         # 4 CPU-seconds over 4 cores at 10% => required cycle 10s > base 5s.
         sleep = self.gov.throttle_sleep(cpu_used_seconds=4.0, elapsed_seconds=1.0, base_interval=5.0)
-        self.assertGreaterEqual(sleep, 9.0)  # ~10 - 1 (plus possible load backoff)
+        self.assertGreaterEqual(sleep, 9.0)  # ~10 - 1
 
     def test_never_negative(self):
         sleep = self.gov.throttle_sleep(cpu_used_seconds=0.0, elapsed_seconds=100.0, base_interval=5.0)

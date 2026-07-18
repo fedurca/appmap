@@ -351,6 +351,15 @@ host's report shows a **Capture quality** posture line (`exact` /
 `per-socket-tcp` / `topology-only`) so a SOC knows where byte counts are
 trustworthy.
 
+## Documentation
+
+- How it works / what it does: [`docs/how-it-works.md`](docs/how-it-works.md)
+  (EN), [`docs/jak-funguje-cs.md`](docs/jak-funguje-cs.md) (CS)
+- Usage & deployment (CS): [`docs/pouziti-cs.md`](docs/pouziti-cs.md)
+- Bill of materials: [`SBOM.md`](SBOM.md)
+- Packaging & CI (MSI, Docker, Snap, Flatpak, AppImage):
+  [`packaging/`](packaging), [`.github/workflows/`](.github/workflows)
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).

@@ -1,0 +1,4 @@
+# commatrix has no third-party runtime dependencies (standard library only).
+# The package itself is installed from the locally built wheel via PIP_FIND_LINKS
+# (see build-appimage.sh). Keeping the name here lets python-appimage resolve it.
+commatrix

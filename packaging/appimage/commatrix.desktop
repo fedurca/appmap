@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=commatrix
+Comment=Network communication matrix and application catalog
+Exec=commatrix
+Icon=commatrix
+Categories=System;Network;Monitor;
+Terminal=true

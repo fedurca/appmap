@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 source for the commatrix MSI. Built by build_msi.ps1 (and in CI on
+  windows-latest). Lays the self-contained payload (embedded Python + commatrix
+  + commatrix.cmd) into Program Files and registers/removes the SYSTEM startup
+  task via the bundled launcher. Version and payload dir are passed with -d.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Commatrix"
+           Manufacturer="Commatrix contributors"
+           Version="$(var.Version)"
+           UpgradeCode="7d3f6a4e-2c1b-4e2a-9f10-commatrix001"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Commatrix is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="commatrix" />
+    </StandardDirectory>
+
+    <!-- Harvest the whole payload tree into INSTALLFOLDER. -->
+    <ComponentGroup Id="PayloadFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PayloadDir)\**" />
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Commatrix collector" Level="1">
+      <ComponentGroupRef Id="PayloadFiles" />
+    </Feature>
+
+    <!-- Register the SYSTEM startup task on install, remove it on uninstall.
+         The launcher (commatrix.cmd) runs the bundled Python. -->
+    <CustomAction Id="RegisterTask"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]commatrix.cmd&quot; install-windows"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="UnregisterTask"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]commatrix.cmd&quot; uninstall-windows"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterTask" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="UnregisterTask" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

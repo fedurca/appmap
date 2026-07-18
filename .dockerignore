@@ -1,0 +1,14 @@
+.git
+.github
+ansible
+docs
+dist
+build
+tests
+snap
+packaging
+*.md
+!README.md
+**/__pycache__
+*.pyc
+.venv
