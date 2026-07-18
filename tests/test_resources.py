@@ -14,7 +14,9 @@ class GovernorCpuTest(unittest.TestCase):
         self.gov = ResourceGovernor(cpu_budget=0.10, ncpu=4, min_interval=1.0)
         # Pin load average low so the (host-dependent) load backoff does not make
         # these assertions flaky under CI/build load.
-        patcher = mock.patch.object(rsrc.os, "getloadavg", return_value=(0.0, 0.0, 0.0))
+        patcher = mock.patch.object(
+            rsrc.os, "getloadavg", return_value=(0.0, 0.0, 0.0), create=True,
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 

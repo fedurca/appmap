@@ -53,8 +53,10 @@ jsou u **GitHub Releases**:
 
 Docker image: `ghcr.io/fedurca/commatrix:latest` (a tag `ghcr.io/fedurca/commatrix:<verze>`).
 
-Release vznikne po pushi tagu `vX.Y.Z` (workflow [`.github/workflows/release.yml`](.github/workflows/release.yml)).
-Dokud release neexistuje, stáhněte zdroj z `main` a použijte `./install.sh` /
+Release vznikne po pushi tagu `vX.Y.Z` / `X.Y.Z`, po publikaci release ve webovém UI,
+nebo ručně: Actions → Release → Run workflow. Workflow přiloží MSI, AppImage, wheel,
+Snap/Flatpak (best-effort) a SBOM k danému tagu.
+Dokud artefakty nejsou, stáhněte zdroj z `main` a použijte `./install.sh` /
 `install-windows`.
 
 ## Model capture

@@ -13,10 +13,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import pwd
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+try:
+    import pwd
+except ImportError:  # Windows — elevate-linux is Linux-only
+    pwd = None  # type: ignore[assignment]
 
 log = logging.getLogger("commatrix.elevate_linux")
 
@@ -149,6 +153,9 @@ def _save_state(path: str, state: Dict[str, Any]) -> None:
 
 
 def _ensure_service_user(result: ElevateResult, dry_run: bool) -> None:
+    if pwd is None:
+        result.warnings.append("pwd module unavailable (not Linux); skip user ensure")
+        return
     try:
         pwd.getpwnam(SERVICE_USER)
         result.actions.append(f"service user '{SERVICE_USER}' already exists")

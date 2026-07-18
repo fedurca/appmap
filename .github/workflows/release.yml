@@ -1,12 +1,21 @@
 name: Release
 
+# Builds deployment packages and attaches them to a GitHub Release.
+# Triggers:
+#   - push of tags v1.2.3 or 1.2.3
+#   - publishing a release in the GitHub UI (even without a v* tag)
+#   - manual "Run workflow" with version X.Y.Z
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*.*.*"
+      - "[0-9]+.[0-9]+.[0-9]+"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (X.Y.Z) for a manual build"
+        description: "Version (X.Y.Z) — also the existing release tag to update"
         required: true
 
 permissions:
@@ -18,21 +27,30 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
       - id: v
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
-            v="${{ github.event.inputs.version }}"
+            tag="${{ github.event.inputs.version }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
           else
-            v="${GITHUB_REF#refs/tags/}"; v="${v#v}"
+            tag="${GITHUB_REF#refs/tags/}"
           fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
+          # Semver without optional leading "v"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building packages for tag=$tag version=$version"
 
   sdist-wheel:
     needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: python packaging/version.py set "${{ needs.version.outputs.version }}"
@@ -45,8 +63,11 @@ jobs:
   docker:
     needs: version
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - run: python packaging/version.py set "${{ needs.version.outputs.version }}"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -68,9 +89,12 @@ jobs:
   appimage:
     needs: version
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: sudo apt-get update && sudo apt-get install -y libfuse2
@@ -82,10 +106,15 @@ jobs:
   msi:
     needs: version
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
       - run: python packaging/version.py set "${{ needs.version.outputs.version }}"
       - run: powershell -ExecutionPolicy Bypass -File packaging/windows/build_msi.ps1 -Version "${{ needs.version.outputs.version }}"
       - uses: actions/upload-artifact@v4
@@ -94,8 +123,11 @@ jobs:
   snap:
     needs: version
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - run: python3 packaging/version.py set "${{ needs.version.outputs.version }}"
       - uses: snapcore/action-build@v1
         id: snapcraft
@@ -105,11 +137,14 @@ jobs:
   flatpak:
     needs: version
     runs-on: ubuntu-latest
+    continue-on-error: true
     container:
       image: bilelmoussaoui/flatpak-github-actions:freedesktop-23.08
       options: --privileged
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: commatrix.flatpak
@@ -121,8 +156,11 @@ jobs:
   sbom:
     needs: version
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: anchore/sbom-action@v0
         with:
           path: .
@@ -133,20 +171,34 @@ jobs:
 
   release:
     needs: [version, sdist-wheel, docker, appimage, msi, snap, flatpak, sbom]
+    if: ${{ always() && needs.version.result == 'success' && needs.sdist-wheel.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
       - name: Collect and checksum
         run: |
-          mkdir release
-          find artifacts -type f \( -name '*.AppImage' -o -name '*.msi' -o -name '*.snap' \
-            -o -name '*.flatpak' -o -name '*.whl' -o -name '*.tar.gz' -o -name '*.cdx.json' \) \
-            -exec cp {} release/ \;
+          mkdir -p release
+          find artifacts -type f \( \
+              -name '*.AppImage' -o -name '*.msi' -o -name '*.snap' \
+              -o -name '*.flatpak' -o -name '*.whl' -o -name '*.tar.gz' \
+              -o -name '*.cdx.json' \
+            \) -exec cp -n {} release/ \; || true
+          n=$(find release -type f | wc -l)
+          echo "Collected $n artifact file(s):"
+          ls -la release || true
+          if [ "$n" -eq 0 ]; then
+            echo "No package artifacts to attach" >&2
+            exit 1
+          fi
           cd release && sha256sum * > SHA256SUMS
-          # Signing hook (disabled): add a Windows signtool step for the MSI and
-          # 'gpg --detach-sign --armor SHA256SUMS' here once certs/keys exist.
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
           files: release/*
-          generate_release_notes: true
+          fail_on_unmatched_files: false
+          generate_release_notes: ${{ github.event_name != 'release' }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

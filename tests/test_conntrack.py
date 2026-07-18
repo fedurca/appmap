@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -115,6 +116,7 @@ class SysctlFlagTest(unittest.TestCase):
         self.assertFalse(ct.write_sysctl_flag("/proc/does/not/exist", True))
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "sysctl /proc paths")
 class SysctlGuardTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

@@ -55,9 +55,10 @@ are published on **GitHub Releases**:
 
 Docker image: `ghcr.io/fedurca/commatrix:latest` (and `ghcr.io/fedurca/commatrix:<version>`).
 
-A release is created when you push a `vX.Y.Z` tag (workflow
-[`.github/workflows/release.yml`](.github/workflows/release.yml)). Until then,
-clone `main` and use `./install.sh` / `install-windows`.
+A release is built when you push a `vX.Y.Z` / `X.Y.Z` tag, publish a release in
+the GitHub UI, or run Actions → Release → Run workflow. The workflow attaches
+MSI, AppImage, wheel, Snap/Flatpak (best-effort) and SBOM to that tag.
+Until assets exist, clone `main` and use `./install.sh` / `install-windows`.
 
 ## Capture model
 

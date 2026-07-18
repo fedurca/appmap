@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 
@@ -162,6 +163,7 @@ class StoreRunStatsTest(unittest.TestCase):
 
 
 class StorePermissionsTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "unix mode bits")
     def test_db_created_not_world_readable(self):
         tmp = tempfile.mkdtemp()
         db = os.path.join(tmp, "sub", "test.db")
