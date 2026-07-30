@@ -87,6 +87,56 @@ class ElevateLinuxApplyRevokeTest(unittest.TestCase):
         )
         self.assertFalse(os.path.exists(self.polkit))
 
+    def test_reapply_keeps_original_baseline(self):
+        """SEC-007 regression: apply -> apply -> revoke must fully restore.
+
+        The second apply used to re-snapshot the already elevated drop-in as
+        the "before" state, so revoke wrote the elevated file back over itself
+        and reported success while the capabilities stayed in force.
+        """
+
+        original = "[Service]\nUser=commatrix\nAmbientCapabilities=CAP_NET_ADMIN\n"
+        with open(self.dropin, "w", encoding="utf-8") as fh:
+            fh.write(original)
+
+        first = el.apply_elevate(state_file=self.state, dry_run=False, reload=False)
+        self.assertTrue(first.ok)
+
+        second = el.apply_elevate(state_file=self.state, dry_run=False, reload=False)
+        self.assertTrue(second.ok)
+        self.assertTrue(any("already present" in w for w in second.warnings))
+
+        with open(self.state, encoding="utf-8") as fh:
+            state = json.loads(fh.read())
+        self.assertEqual(state["dropin_content"], original)
+        self.assertNotIn("CAP_SYS_PTRACE", state["dropin_content"])
+
+        rev = el.revoke_elevate(state_file=self.state, dry_run=False, reload=False)
+        self.assertTrue(rev.ok)
+        with open(self.dropin, encoding="utf-8") as fh:
+            restored = fh.read()
+        self.assertEqual(restored, original)
+        self.assertNotIn("CAP_SYS_PTRACE", restored)
+        self.assertFalse(os.path.exists(self.polkit))
+
+    def test_reapply_without_prior_dropin_revokes_to_absent(self):
+        """Re-apply on a host that had no drop-in must revoke back to none."""
+
+        for _ in range(3):
+            self.assertTrue(
+                el.apply_elevate(state_file=self.state, dry_run=False, reload=False).ok
+            )
+        with open(self.state, encoding="utf-8") as fh:
+            state = json.loads(fh.read())
+        self.assertFalse(state["dropin_existed"])
+        self.assertIsNone(state["dropin_content"])
+
+        self.assertTrue(
+            el.revoke_elevate(state_file=self.state, dry_run=False, reload=False).ok
+        )
+        self.assertFalse(os.path.exists(self.dropin))
+        self.assertFalse(os.path.exists(self.polkit))
+
     def test_revoke_without_state_removes_artifacts(self):
         with open(self.dropin, "w", encoding="utf-8") as fh:
             fh.write(el.render_dropin())

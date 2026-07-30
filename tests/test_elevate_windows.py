@@ -103,6 +103,57 @@ class ElevateWindowsApplyRevokeTest(unittest.TestCase):
         deletes = [c for c in self.calls if c[:3] == ["net", "user", "commatrix"] and "/delete" in c]
         self.assertTrue(deletes)
 
+    def test_reapply_keeps_user_created_and_baseline(self):
+        """SEC-024 regression: apply -> apply -> revoke must still clean up.
+
+        The second apply re-snapshotted the already-rebound task as
+        "previous_run_as" and reset user_created to False (the account exists
+        by then), so revoke left both the elevated binding and the service
+        account behind while reporting success.
+        """
+
+        self.assertTrue(ew.apply_elevate(state_file=self.state, dry_run=False).ok)
+        with open(self.state, encoding="utf-8") as fh:
+            first = json.loads(fh.read())
+        self.assertTrue(first["user_created"])
+        self.assertEqual(first["previous_run_as"], "SYSTEM")
+
+        # Second apply: the account now exists, and the task is already bound
+        # to it -- neither must be allowed to overwrite the baseline.
+        with mock.patch.object(ew, "_user_exists", return_value=True):
+            second = ew.apply_elevate(state_file=self.state, dry_run=False)
+        self.assertTrue(second.ok)
+        self.assertTrue(any("already present" in w for w in second.warnings))
+
+        with open(self.state, encoding="utf-8") as fh:
+            state = json.loads(fh.read())
+        self.assertTrue(state["user_created"], "revoke would leave the account")
+        self.assertEqual(state["previous_run_as"], "SYSTEM")
+
+        self.calls.clear()
+        self.assertTrue(ew.revoke_elevate(state_file=self.state, dry_run=False).ok)
+        deletes = [
+            c for c in self.calls
+            if c[:3] == ["net", "user", "commatrix"] and "/delete" in c
+        ]
+        self.assertTrue(deletes, "service account must still be removed")
+
+    def test_revoke_honours_recorded_run_as(self):
+        """CODE-025: revoke must not hardcode SYSTEM."""
+
+        with open(self.state, "w", encoding="utf-8") as fh:
+            json.dump({
+                "version": 1,
+                "user_created": False,
+                "previous_task_command": "python -m commatrix collect",
+                "previous_run_as": "DOMAIN\\svc-collector",
+            }, fh)
+        self.assertTrue(ew.revoke_elevate(state_file=self.state, dry_run=False).ok)
+        creates = [c for c in self.calls if c and c[0] == "schtasks" and "/create" in c]
+        self.assertTrue(creates)
+        self.assertIn("DOMAIN\\svc-collector", creates[-1])
+        self.assertNotIn("SYSTEM", creates[-1])
+
     def test_apply_requires_admin(self):
         with mock.patch("commatrix.platform.win.runtime.is_admin", return_value=False):
             result = ew.apply_elevate(state_file=self.state, dry_run=False)

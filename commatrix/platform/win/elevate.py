@@ -328,15 +328,32 @@ def apply_elevate(
         )
         return result
 
-    prev_run_as = _query_task_run_as()
-    prev_cmd = _query_task_command()
+    # SEC-024: mirror of SEC-007 on Linux. Re-snapshotting on a second apply
+    # would record the already-elevated task binding as "previous", and would
+    # reset user_created to False because the account now exists -- so a later
+    # --revoke would leave both the rebound task and the service account in
+    # place while reporting success. The baseline is captured once.
+    existing_state = _load_state(state_path)
+    if existing_state:
+        result.warnings.append(
+            f"state already present at {state_path}; re-applying "
+            "(keeping the originally recorded pre-elevation baseline)"
+        )
+        prev_run_as = existing_state.get("previous_run_as")
+        prev_cmd = existing_state.get("previous_task_command")
+        prev_user_created = bool(existing_state.get("user_created"))
+    else:
+        prev_run_as = _query_task_run_as()
+        prev_cmd = _query_task_command()
+        prev_user_created = False
+
     state = {
         "version": 1,
         "service_user": SERVICE_USER,
         "task_name": TASK_NAME,
         "previous_run_as": prev_run_as,
         "previous_task_command": prev_cmd,
-        "user_created": False,
+        "user_created": prev_user_created,
         "dns_channel": DNS_CHANNEL,
     }
 
@@ -344,7 +361,9 @@ def apply_elevate(
     password = _ensure_user(result, dry_run=False)
     if not result.ok:
         return result
-    state["user_created"] = not existed
+    # Only ever latch this on: if a previous apply created the account, revoke
+    # must still remove it even though it exists by the time we re-apply.
+    state["user_created"] = prev_user_created or not existed
 
     _save_state(state_path, state)
     result.actions.append(f"saved previous state -> {state_path}")
@@ -397,16 +416,20 @@ def revoke_elevate(
         f'"{sys.executable}" -m commatrix collect --config '
         f'"{os.path.join(default_data_dir(), "commatrix.conf")}"'
     )
+    # CODE-025: restore whatever the task actually ran as before elevation.
+    # Hardcoding SYSTEM silently promoted hosts whose task had deliberately
+    # been bound to a narrower account.
+    run_as = state.get("previous_run_as") or "SYSTEM"
     create = _run([
         "schtasks", "/create", "/tn", TASK_NAME,
         "/tr", cmd, "/sc", "onstart", "/rl", "highest", "/f",
-        "/ru", "SYSTEM",
+        "/ru", run_as,
     ])
     if create.returncode == 0:
-        result.actions.append(f"restored task '{TASK_NAME}' to SYSTEM")
+        result.actions.append(f"restored task '{TASK_NAME}' to {run_as}")
     else:
         result.warnings.append(
-            f"could not restore SYSTEM task: {(create.stderr or '').strip()}"
+            f"could not restore task as {run_as}: {(create.stderr or '').strip()}"
         )
 
     if state.get("user_created"):

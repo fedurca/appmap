@@ -207,22 +207,37 @@ def apply_elevate(
         result.errors.append("elevate-linux requires root")
         return result
 
-    if _load_state(state_file) and os.path.exists(DROPIN_PATH):
+    existing_state = _load_state(state_file)
+    if existing_state and os.path.exists(DROPIN_PATH):
         result.warnings.append(
-            f"state already present at {state_file}; re-applying drop-in/polkit"
+            f"state already present at {state_file}; re-applying drop-in/polkit "
+            "(keeping the originally recorded pre-elevation baseline)"
         )
 
-    dropin_before = _read_file(DROPIN_PATH)
-    polkit_before = _read_file(POLKIT_PATH)
-    unit_user_before = _read_unit_user()
+    if existing_state:
+        # SEC-007: re-snapshotting here would record the *already elevated*
+        # drop-in as the "before" state, so a later --revoke would restore the
+        # elevated file over itself and report success while CAP_SYS_PTRACE et
+        # al stayed in force. The baseline is only ever captured on first apply.
+        dropin_before = existing_state.get("dropin_content")
+        polkit_before = existing_state.get("polkit_content")
+        unit_user_before = existing_state.get("unit_user")
+        dropin_existed = bool(existing_state.get("dropin_existed"))
+        polkit_existed = bool(existing_state.get("polkit_existed"))
+    else:
+        dropin_before = _read_file(DROPIN_PATH)
+        polkit_before = _read_file(POLKIT_PATH)
+        unit_user_before = _read_unit_user()
+        dropin_existed = dropin_before is not None
+        polkit_existed = polkit_before is not None
 
     state = {
         "version": 1,
         "dropin_path": DROPIN_PATH,
         "polkit_path": POLKIT_PATH,
-        "dropin_existed": dropin_before is not None,
+        "dropin_existed": dropin_existed,
         "dropin_content": dropin_before,
-        "polkit_existed": polkit_before is not None,
+        "polkit_existed": polkit_existed,
         "polkit_content": polkit_before,
         "unit_user": unit_user_before,
         "caps": list(ELEVATE_CAPS),

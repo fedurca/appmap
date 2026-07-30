@@ -1,11 +1,27 @@
 # commatrix container image (standard-library only; no pip install needed).
 #
-# The collector needs host visibility to be useful, so run it with:
-#   docker run --rm --network host --pid host \
+# Report and aggregate need no extra privileges at all:
+#   docker run --rm -v /var/lib/commatrix:/var/lib/commatrix \
+#     ghcr.io/fedurca/commatrix:latest report -f html --database /var/lib/commatrix/central.db
+#
+# Live capture needs host visibility. Grant exactly the capabilities the
+# collector uses and nothing more:
+#   docker run --rm --network host --pid host --user 0 \
+#     --cap-drop ALL \
 #     --cap-add NET_ADMIN --cap-add SYS_PTRACE --cap-add DAC_READ_SEARCH \
 #     -v /var/lib/commatrix:/var/lib/commatrix \
 #     ghcr.io/fedurca/commatrix:latest collect --allow-manual --database /var/lib/commatrix/commatrix.db
-# (or simply --privileged). For report/aggregate only, no extra privileges are needed.
+#
+# Do NOT use --privileged. It disables seccomp, AppArmor/SELinux and the
+# device cgroup and grants every capability, which is a trivial host escape --
+# the exact opposite of the least-privilege model the elevate-linux and
+# elevate-windows paths are built around. --cap-add of the three capabilities
+# above is strictly more restrictive and is all the collector needs.
+# TODO(SEC-044): pin this to a digest. Left as a tag deliberately -- a
+# placeholder digest would break the build, and the correct value has to come
+# from the registry:
+#   docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}'
+# then use  FROM python:3.12-slim@sha256:<digest>  and refresh it via Dependabot.
 FROM python:3.12-slim
 
 ARG VERSION=0.0.0
@@ -22,6 +38,13 @@ COPY pyproject.toml README.md LICENSE /opt/commatrix/
 ENV PYTHONPATH=/opt/commatrix \
     PYTHONUNBUFFERED=1
 WORKDIR /opt/commatrix
+
+# Default to an unprivileged UID (SEC-044). Live capture overrides this with
+# --user 0 plus the three --cap-add flags above. Note for report/aggregate: a
+# bind-mounted output directory must be writable by UID 65532, or pass
+# --user "$(id -u):$(id -g)" to match the host owner.
+RUN useradd --system --uid 65532 --no-create-home --shell /usr/sbin/nologin commatrix
+USER 65532:65532
 
 ENTRYPOINT ["python", "-m", "commatrix"]
 CMD ["--help"]
