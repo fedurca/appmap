@@ -16,14 +16,60 @@ Commatrix lze provozovat ve třech úrovních práv (zvolte jednu na hostitele):
 1. **Pod uživatelem** — bez elevace. Topologie a omezená atribuce; vhodné pro
    lab a lehké inventáře.
 2. **Uživatel se zvýšenými právy** — `elevate-linux` / `elevate-windows` dá
-   dedicated účtu `commatrix` maximum capabilities/ACL **bez** běhu jako
-   root/Administrator a **bez** otevření cesty k získání rootu (žádné sudoers,
-   setuid ani členství v Administrators). Podrobnosti:
-   [`docs/elevace-cs.md`](docs/elevace-cs.md)
+   dedicated účtu `commatrix` cílené capability/ACL **bez** běhu jako
+   root/Administrator, bez sudoers, setuid i členství v Administrators.
+   Podrobnosti: [`docs/elevace-cs.md`](docs/elevace-cs.md)
    ([EN](docs/elevation-en.md)).
 3. **Pod administrátorem / rootem** — `install.sh --as-root` nebo Windows SYSTEM
    přes `install-windows`. Plný capture včetně spolehlivého SNI, kde OS Admin
    vyžaduje.
+
+### Co režim 2 ve skutečnosti znamená
+
+Dřívější znění tohoto README slibovalo u režimu 2 „**bez** otevření cesty
+k získání rootu". **To neplatilo** a bylo to opraveno. Naměřeno na živém jádře
+(`setpriv`, cizí UID):
+
+| capabilities | `listdir(/proc/PID/fd)` | `readlink(fd/N)` | `readlink(exe)` |
+| --- | --- | --- | --- |
+| žádné | ✗ | ✗ | ✗ |
+| `CAP_DAC_READ_SEARCH` | ✓ | ✗ | ✗ |
+| `CAP_SYS_PTRACE` | ✗ | — | ✓ |
+| **obě** | ✓ | ✓ | ✓ |
+
+Atribuce procesů napříč uživateli potřebuje **obě** capability — ani jedna sama
+nestačí. A ta dvojice je čtecím ekvivalentem rootu nad každým procesem
+i souborem na hostiteli.
+
+Proto má `elevate-linux` dva profily:
+
+```bash
+sudo commatrix elevate-linux --profile topology
+sudo commatrix elevate-linux --profile attribution   # výchozí
+```
+
+- **`topology`** — jen `CAP_NET_ADMIN` + `CAP_NET_RAW`. Toky i služby se sbírají
+  normálně, ale sloupce proces/unit/balíček zůstanou u cizích procesů prázdné.
+  Žádné zbytkové riziko.
+- **`attribution`** (výchozí) — přidá `CAP_DAC_READ_SEARCH` + `CAP_SYS_PTRACE`.
+  Drop-in to omezuje dvěma nezávislými mechanismy:
+  `SystemCallFilter=~@debug ptrace process_vm_readv process_vm_writev` odebírá
+  eskalační primitivum (čtení `/proc` používá jen `openat`/`getdents`/
+  `readlinkat`, kdežto `PTRACE_ATTACH` potřebuje syscall `ptrace`), a
+  `ProtectHome=tmpfs` + `InaccessiblePaths=` schovají citlivé cesty přes mount
+  namespace, který `CAP_DAC_READ_SEARCH` obejít nedokáže.
+
+  **Zbytkové riziko zůstává:** kompromitace collectoru znamená čtení všeho, co
+  je mimo `InaccessiblePaths`. `apply_elevate` na to při každém spuštění
+  upozorní.
+
+Na Windows se `SeDebugPrivilege` **neuděluje** — atribuce používá
+`PROCESS_QUERY_LIMITED_INFORMATION` + `QueryFullProcessImageNameW`, což na cizí
+procesy funguje i bez něj. Pro protected (PPL) procesy je k dispozici opt-in:
+
+```bash
+python -m commatrix elevate-windows --allow-sedebug
+```
 
 ```bash
 # Linux: po ./install.sh (service účet)
@@ -97,11 +143,11 @@ sysctl -w net.netfilter.nf_conntrack_timestamp=1
 | Metoda | Platforma | Co dostanete | Limity |
 |---|---|---|---|
 | **`./install.sh`** → systemd | Linux | Collector, config, limity CPU/RAM, volitelně Zabbix | Plný capture: `--as-root` nebo `elevate-linux` |
-| **`commatrix elevate-linux`** | Linux | Ambient caps + polkit DNS na účet `commatrix` | Setup jednou jako root; bez sudoers/setuid — [elevace](docs/elevace-cs.md) |
+| **`commatrix elevate-linux`** | Linux | Ambient caps + polkit DNS na účet `commatrix` | Setup jednou jako root; `--profile topology` bez zbytkového rizika — [elevace](docs/elevace-cs.md) |
 | **`packaging/install-service.sh`** | Linux | Systémová instalace + ovládání přes `commatrix-ctl` | Stejný privilege model; delegace jen pro unit |
 | **`pip install .` / ze zdroje** | Linux, Windows | CLI | Bez auto-startu, dokud nepřidáte unit/task |
 | **`install-windows`** | Windows | Scheduled task jako SYSTEM | Admin k instalaci; SNI potřebuje Admin |
-| **`elevate-windows`** | Windows | Dedicated user + Event Log / SeDebug | Setup jednou Admin; SNI zůstává u režimu 3 — [elevace](docs/elevace-cs.md) |
+| **`elevate-windows`** | Windows | Dedicated user + Event Log Readers | Setup jednou Admin; SeDebug jen s `--allow-sedebug`; SNI zůstává u režimu 3 — [elevace](docs/elevace-cs.md) |
 | **MSI / SCCM** | Windows | Installer / fleet push | Stejné limity runtime |
 | **Ansible** | Linux + Windows | Deploy, pull DB, aggregate HTML | SSH / WinRM |
 | **Docker / GHCR** | Linux kontejnery | CLI + report | Live capture: privileged + host network |
@@ -117,7 +163,7 @@ sudo ./install.sh                 # systémově; nainstaluje a spustí službu
 sudo ./install.sh --no-start
 ./install.sh --user               # lab (user session)
 sudo ./install.sh --uninstall     # odebere (config/data nechá); revoke elevate
-sudo commatrix elevate-linux      # režim 2: max bez rootu
+sudo commatrix elevate-linux      # režim 2 (profil attribution)
 ```
 
 ### Ovládání služby jako běžný uživatel
@@ -136,6 +182,47 @@ python -m commatrix elevate-windows   # volitelně režim 2
 
 Fleet: [`ansible/`](ansible/README.md), Windows playbook
 [`ansible/deploy_windows.yml`](ansible/deploy_windows.yml).
+
+## Breaking changes oproti 344112e
+
+Po bezpečnostní revizi se změnily výchozí hodnoty. Kdo běží podle starého
+quick-startu, po upgradu narazí:
+
+| Co | Dřív | Teď |
+| --- | --- | --- |
+| `commatrix serve` bez `--token` | nastartoval | **odmítne nastartovat** |
+| `commatrix serve --host` | `0.0.0.0` | `127.0.0.1` |
+| `commatrix-server.service` | funkční `ExecStart` bez tokenu | vyžaduje `EnvironmentFile=/etc/commatrix/server.env` |
+| `commatrix-export.service` | `User=root` | `User=commatrix` |
+| Docker | dokumentováno `--privileged` | `--cap-drop ALL` + tři konkrétní capability |
+| Windows `elevate-windows` | uděloval `SeDebugPrivilege` | neuděluje; opt-in `--allow-sedebug` |
+| Docker image | běžel jako root | `USER 65532` |
+
+Token pro server se generuje takto:
+
+```bash
+install -d -m 0750 -o commatrix -g commatrix /etc/commatrix
+printf 'COMMATRIX_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/commatrix/server.env
+chown root:commatrix /etc/commatrix/server.env
+chmod 0640 /etc/commatrix/server.env
+```
+
+Token nikdy nedávejte na příkazovou řádku — je čitelný přes `ps` a `/proc`.
+Podporované zdroje v pořadí priority: `--token-file`, `COMMATRIX_TOKEN`,
+`--token` (poslední varuje).
+
+## Bezpečnostní poznámky
+
+- **Report je aktivní obsah.** HTML dashboard vkládá jména peerů, která pochází
+  z reverzního DNS, z SNI parseru a z endpointu `/ingest` — tedy z dat, která
+  ovládá protistrana. Všechny výstupní cesty escapují podle cílové syntaxy
+  (HTML entity pro mermaid, vlastní escaping pro DOT, apostrofový prefix pro CSV).
+- **Report je citlivý dokument.** Obsahuje kompletní mapu vnitřní sítě. Databáze
+  vzniká s právy `0640` a adresář `0750`.
+- **`--host` filtruje všechny výstupy.** Per-host report neobsahuje nálezy ani
+  topologii jiných hostů.
+- **`/ingest` je autoritativní zápis.** Bez tokenu by kdokoli v dosahu portu
+  mohl podvrhnout záznamy toků pro libovolný host.
 
 ## Bezpečnost vůči hostiteli
 

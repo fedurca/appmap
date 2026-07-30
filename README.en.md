@@ -18,14 +18,62 @@ Commatrix can be operated in three privilege modes (pick one per host):
 1. **As a normal user** — no elevation. Topology and limited attribution;
    enough for labs and light inventories.
 2. **Elevated service user** — `elevate-linux` / `elevate-windows` grant the
-   dedicated `commatrix` account the maximum capabilities/ACLs **without**
-   running as root/Administrator and **without** opening a path to obtain root
-   (no sudoers, setuid, or Administrators membership). See
-   [`docs/elevation-en.md`](docs/elevation-en.md)
+   dedicated `commatrix` account targeted capabilities/ACLs without running as
+   root/Administrator, and without sudoers, setuid or Administrators
+   membership. See [`docs/elevation-en.md`](docs/elevation-en.md)
    ([Česky](docs/elevace-cs.md)).
 3. **As Administrator / root** — `install.sh --as-root` or Windows SYSTEM via
    `install-windows`. Full capture including reliable SNI where the OS requires
    Admin.
+
+### What mode 2 actually buys you
+
+An earlier version of this README promised mode 2 grants privileges "**without**
+opening a path to obtain root". **That was not true** and has been corrected.
+Measured on a live kernel with `setpriv`, against a process owned by another
+UID:
+
+| capabilities | `listdir(/proc/PID/fd)` | `readlink(fd/N)` | `readlink(exe)` |
+| --- | --- | --- | --- |
+| none | denied | denied | denied |
+| `CAP_DAC_READ_SEARCH` | OK | denied | denied |
+| `CAP_SYS_PTRACE` | denied | — | OK |
+| **both** | OK | OK | OK |
+
+Cross-user process attribution needs **both** capabilities; neither is useful
+alone. That pair is read-equivalent to root over every process and every file
+on the host.
+
+`elevate-linux` therefore has two profiles:
+
+```bash
+sudo commatrix elevate-linux --profile topology
+sudo commatrix elevate-linux --profile attribution   # default
+```
+
+- **`topology`** — `CAP_NET_ADMIN` + `CAP_NET_RAW` only. Flows and services are
+  still collected; the process/unit/package columns stay empty for other users'
+  processes. No residual risk.
+- **`attribution`** (default) — adds `CAP_DAC_READ_SEARCH` + `CAP_SYS_PTRACE`,
+  confined by two independent mechanisms.
+  `SystemCallFilter=~@debug ptrace process_vm_readv process_vm_writev` removes
+  the escalation primitive (reading `/proc` only uses `openat`/`getdents`/
+  `readlinkat`, whereas `PTRACE_ATTACH` needs the `ptrace` syscall), and
+  `ProtectHome=tmpfs` + `InaccessiblePaths=` hide sensitive paths behind a
+  mount namespace, which `CAP_DAC_READ_SEARCH` cannot bypass.
+
+  **Residual risk remains:** compromising the collector still discloses
+  anything readable outside those `InaccessiblePaths`. `apply_elevate` says so
+  on every run.
+
+On Windows, `SeDebugPrivilege` is **not** granted. Attribution uses
+`PROCESS_QUERY_LIMITED_INFORMATION` with `QueryFullProcessImageNameW`, which
+works against other users' processes without it. Opt in only for protected
+(PPL) processes:
+
+```bash
+python -m commatrix elevate-windows --allow-sedebug
+```
 
 ```bash
 # Linux: after ./install.sh (service user)
@@ -114,11 +162,11 @@ Reading `/proc/net/nf_conntrack` and `/proc/<pid>/fd` for other users requires
 | **`packaging/install-service.sh`** | Linux | System install + user control via scoped sudoers/`commatrix-ctl` | Same privilege model as `install.sh`; control delegation is for the unit only |
 | **`pip install .` / run from source** | Linux, Windows | CLI (`collect`, `report`, `aggregate`, …) | No auto-start unless you add a unit/task yourself |
 | **`python -m commatrix install-windows`** | Windows | Scheduled task as SYSTEM, data under ProgramData | Needs Administrator to install; byte counts are best-effort ESTATS; SNI needs Admin + `[sni] enabled` |
-| **`commatrix elevate-windows`** | Windows | Dedicated user + Event Log / SeDebug; task off SYSTEM | Setup needs Admin once; SNI still needs Admin/SYSTEM; see [elevation docs](docs/elevation-en.md) |
+| **`commatrix elevate-windows`** | Windows | Dedicated user + Event Log Readers; task off SYSTEM (SeDebug only with `--allow-sedebug`) | Setup needs Admin once; SNI still needs Admin/SYSTEM; see [elevation docs](docs/elevation-en.md) |
 | **MSI** (`packaging/windows/`, CI release) | Windows | Installer for SCCM / manual deploy | Same runtime limits as `install-windows`; build needs WiX + Python on the build host |
 | **SCCM Script Installer** (`packaging/windows/sccm/`) | Windows | Fleet push via ConfigMgr | Depends on SCCM reachability and how Python/runtime is bundled |
 | **Ansible** (`ansible/deploy.yml`, `deploy_windows.yml`, `pull_and_report.yml`) | Linux + Windows | Deploy collector, pull DBs, aggregate HTML | SSH (Linux) / WinRM (Windows); central node must reach inventory |
-| **Docker / GHCR** (`Dockerfile`, CI) | Linux containers | Reproducible CLI + report tooling | Live host capture needs **privileged + host network** (or matching caps); otherwise use mounted DBs for report/aggregate only |
+| **Docker / GHCR** (`Dockerfile`, CI) | Linux containers | Reproducible CLI + report tooling | Live host capture needs host network/PID plus `--cap-add NET_ADMIN,SYS_PTRACE,DAC_READ_SEARCH` — **do not use `--privileged`**; otherwise use mounted DBs for report/aggregate only |
 | **AppImage** (CI release) | Linux | Single-file binary, no package install | Still needs root/caps for privileged collect; not a substitute for systemd on fleets |
 | **Snap** (`snapcraft.yaml`, classic) | Linux | Distro-agnostic package | Classic confinement; strict confinement cannot usefully see host `/proc`/conntrack |
 | **Flatpak** (`packaging/flatpak/`) | Linux desktop | Sandboxed CLI for **report / aggregate** | **Not for live capture** — sandbox blocks conntrack/proc/netns; use on exported DBs/JSON |
@@ -180,6 +228,48 @@ pip install .        # provides the `commatrix` command; also runnable as `pytho
 host's local database, merge them on a control node and generate one analytical
 overview (`deploy.yml`, `collect.yml`, `report.yml`, `pull_and_report.yml`). See
 [`ansible/README.md`](ansible/README.md).
+
+## Breaking changes since 344112e
+
+Defaults changed after the security review. Anything following the old
+quick-start will fail after upgrading:
+
+| Item | Before | Now |
+| --- | --- | --- |
+| `commatrix serve` without `--token` | started | **refuses to start** |
+| `commatrix serve --host` | `0.0.0.0` | `127.0.0.1` |
+| `commatrix-server.service` | working `ExecStart`, no token | requires `EnvironmentFile=/etc/commatrix/server.env` |
+| `commatrix-export.service` | `User=root` | `User=commatrix` |
+| Docker | documented `--privileged` | `--cap-drop ALL` plus three named capabilities |
+| `elevate-windows` | granted `SeDebugPrivilege` | opt-in via `--allow-sedebug` |
+| Docker image | ran as root | `USER 65532` |
+
+Generate the server token like this:
+
+```bash
+install -d -m 0750 -o commatrix -g commatrix /etc/commatrix
+printf 'COMMATRIX_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/commatrix/server.env
+chown root:commatrix /etc/commatrix/server.env
+chmod 0640 /etc/commatrix/server.env
+```
+
+Never put the token on the command line — it is readable by any local user via
+`ps` and `/proc`. Sources in precedence order: `--token-file`,
+`COMMATRIX_TOKEN`, `--token` (the last one warns).
+
+## Security notes
+
+- **The report is active content.** The HTML dashboard embeds peer names that
+  come from reverse DNS, the SNI parser and the `/ingest` endpoint — data an
+  attacker influences. Every output path escapes for its target syntax (HTML
+  entities for mermaid, DOT-specific escaping for Graphviz, apostrophe prefix
+  for CSV).
+- **The report is a sensitive document.** It is a complete map of the internal
+  network. Databases are created `0640` in a `0750` directory.
+- **`--host` scopes every output.** A per-host report contains no findings or
+  topology belonging to other hosts.
+- **`/ingest` is an authoritative write.** Without a token anyone who can reach
+  the port could forge flow records for any host.
 
 ## Resource safety (never hurt the host)
 
