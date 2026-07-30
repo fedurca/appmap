@@ -33,37 +33,127 @@ DROPIN_PATH = os.path.join(DROPIN_DIR, "60-elevate.conf")
 POLKIT_PATH = "/etc/polkit-1/rules.d/50-commatrix-resolved.rules"
 
 # Caps for max capture without escalation primitives.
-ELEVATE_CAPS = (
-    "CAP_DAC_READ_SEARCH",
-    "CAP_NET_ADMIN",
-    "CAP_NET_RAW",
-    "CAP_SYS_PTRACE",
+# Capability profiles.
+#
+# Measured behaviour of the two "attribution" capabilities (kernel 6.x,
+# verified with setpriv against a process owned by another UID):
+#
+#   caps                        listdir(/proc/PID/fd)  readlink(fd/N)  readlink(exe)
+#   ----                        ---------------------  --------------  -------------
+#   (none)                      denied                 denied          denied
+#   CAP_DAC_READ_SEARCH         OK                     denied          denied
+#   CAP_SYS_PTRACE              denied                 -               OK
+#   both                        OK                     OK              OK
+#
+# So neither capability is useful on its own: build_inode_to_pid() needs the
+# listdir *and* the readlink, and only the pair provides both. The pair is
+# read-equivalent to root over every process and every file on the host. That
+# is why "attribution" cannot honestly be described as having no path back to
+# root -- see the hardening in render_dropin() and docs/elevace-cs.md.
+CAP_PROFILES = {
+    # Sysctl toggling and SNI capture only. No cross-UID process attribution:
+    # flows are still collected and services still resolved by port, but
+    # process/unit/package columns stay empty for other users' processes.
+    "topology": (
+        "CAP_NET_ADMIN",
+        "CAP_NET_RAW",
+    ),
+    # Adds socket -> pid -> executable attribution for processes owned by any
+    # user. Read-equivalent to root; confined by the sandbox directives below.
+    "attribution": (
+        "CAP_DAC_READ_SEARCH",
+        "CAP_NET_ADMIN",
+        "CAP_NET_RAW",
+        "CAP_SYS_PTRACE",
+    ),
+}
+DEFAULT_PROFILE = "attribution"
+
+_ATTRIBUTION_WARNING = (
+    "profile 'attribution' grants CAP_DAC_READ_SEARCH + CAP_SYS_PTRACE, which "
+    "together are read-equivalent to root over every process and file on this "
+    "host. The drop-in confines this with a seccomp filter and a mount "
+    "namespace, but a compromise of the collector still means disclosure of "
+    "anything readable outside those InaccessiblePaths. Use "
+    "'--profile topology' if you do not need per-process attribution."
+)
+
+# Kept for backwards compatibility with callers importing the old name.
+ELEVATE_CAPS = CAP_PROFILES[DEFAULT_PROFILE]
+
+
+def render_dropin(profile: str = DEFAULT_PROFILE) -> str:
+    caps = " ".join(CAP_PROFILES[profile])
+    lines = [
+        "# Managed by: commatrix elevate-linux\n",
+        "# Do not edit by hand; revoke with: commatrix elevate-linux --revoke\n",
+        f"# Capability profile: {profile}\n",
+        "[Service]\n",
+        f"User={SERVICE_USER}\n",
+        f"Group={SERVICE_GROUP}\n",
+        f"AmbientCapabilities={caps}\n",
+        f"CapabilityBoundingSet={caps}\n",
+        "NoNewPrivileges=true\n",
+    ]
+
+    if profile == "attribution":
+        lines += [
+            "\n",
+            "# --- confinement for the attribution capabilities ---------------\n",
+            "# CAP_SYS_PTRACE would otherwise allow attaching to a root process\n",
+            "# and executing code in it. /proc reads do not use the ptrace(2)\n",
+            "# syscall (the kernel's ptrace_may_access check is internal), so\n",
+            "# blocking these three syscalls removes the escalation primitive\n",
+            "# while leaving attribution working.\n",
+            "SystemCallFilter=~@debug ptrace process_vm_readv process_vm_writev\n",
+            "SystemCallArchitectures=native\n",
+            "# CAP_DAC_READ_SEARCH bypasses DAC on every file, so a permission\n",
+            "# check cannot keep it out of /root/.ssh or /etc/ssl/private. It\n",
+            "# cannot, however, bypass a mount namespace -- these directives\n",
+            "# remove the paths from the collector's view entirely.\n",
+            "ProtectHome=tmpfs\n",
+            "ProtectSystem=strict\n",
+            "PrivateTmp=true\n",
+            "InaccessiblePaths=-/etc/ssl/private -/etc/ssh -/var/lib/secrets\n",
+            "ReadWritePaths=/var/lib/commatrix\n",
+            "RestrictNamespaces=true\n",
+            "RestrictSUIDSGID=true\n",
+            "LockPersonality=true\n",
+            "MemoryDenyWriteExecute=true\n",
+        ]
+    return "".join(lines)
+
+
+POLKIT_ACTIONS = (
+    "org.freedesktop.resolve1.subscribe-query-results",
+    "org.freedesktop.resolve1.get-servers",
+    "org.freedesktop.resolve1.get-domains",
 )
 
 
-def render_dropin() -> str:
-    caps = " ".join(ELEVATE_CAPS)
-    return (
-        "# Managed by: commatrix elevate-linux\n"
-        "# Do not edit by hand; revoke with: commatrix elevate-linux --revoke\n"
-        "[Service]\n"
-        f"User={SERVICE_USER}\n"
-        f"Group={SERVICE_GROUP}\n"
-        f"AmbientCapabilities={caps}\n"
-        f"CapabilityBoundingSet={caps}\n"
-        "NoNewPrivileges=true\n"
-    )
-
-
 def render_polkit() -> str:
+    """Render a read-only polkit grant for the service account.
+
+    SEC-008: the previous rule matched on
+    ``action.id.indexOf("org.freedesktop.resolve1") === 0``, i.e. the entire
+    namespace -- which also authorizes mutating actions such as
+    set-dns-servers and set-dns-over-tls, giving the service account a local
+    DNS hijack primitive. This is an explicit allowlist instead.
+    """
+
+    allowed = ",\n".join(f'        "{action}"' for action in POLKIT_ACTIONS)
     return (
         "/* Managed by: commatrix elevate-linux\n"
-        " * Narrow grant: systemd-resolved query-result subscription for the\n"
-        " * dedicated service user only. No shell, no sudo, no other actions.\n"
+        " * Narrow grant: read-only systemd-resolved actions for the dedicated\n"
+        " * service user only. An explicit allowlist, not a namespace prefix.\n"
+        " * No shell, no sudo, no other actions.\n"
         " */\n"
         "polkit.addRule(function(action, subject) {\n"
-        "    if (action.id.indexOf(\"org.freedesktop.resolve1\") === 0 &&\n"
-        f"        subject.user == \"{SERVICE_USER}\") {{\n"
+        "    var allowed = [\n"
+        f"{allowed}\n"
+        "    ];\n"
+        f'    if (subject.user == "{SERVICE_USER}" &&\n'
+        "        allowed.indexOf(action.id) !== -1) {\n"
         "        return polkit.Result.YES;\n"
         "    }\n"
         "});\n"
@@ -198,10 +288,19 @@ def apply_elevate(
     state_file: str = DEFAULT_STATE_FILE,
     dry_run: bool = False,
     reload: bool = True,
+    profile: str = DEFAULT_PROFILE,
 ) -> ElevateResult:
     """Grant ambient caps + polkit DNS to the service account."""
 
     result = ElevateResult()
+    if profile not in CAP_PROFILES:
+        result.ok = False
+        result.errors.append(
+            f"unknown capability profile {profile!r}; "
+            f"choose one of: {', '.join(sorted(CAP_PROFILES))}"
+        )
+        return result
+    caps = CAP_PROFILES[profile]
     if not _is_root() and not dry_run:
         result.ok = False
         result.errors.append("elevate-linux requires root")
@@ -240,16 +339,18 @@ def apply_elevate(
         "polkit_existed": polkit_existed,
         "polkit_content": polkit_before,
         "unit_user": unit_user_before,
-        "caps": list(ELEVATE_CAPS),
+        "profile": profile,
+        "caps": list(caps),
     }
 
     if dry_run:
         result.actions.append(f"[dry-run] would write state -> {state_file}")
         result.actions.append(f"[dry-run] would write drop-in -> {DROPIN_PATH}")
         result.actions.append(f"[dry-run] would write polkit -> {POLKIT_PATH}")
-        result.actions.append(
-            f"[dry-run] caps: {', '.join(ELEVATE_CAPS)}"
-        )
+        result.actions.append(f"[dry-run] profile: {profile}")
+        result.actions.append(f"[dry-run] caps: {', '.join(caps)}")
+        if profile == "attribution":
+            result.warnings.append(_ATTRIBUTION_WARNING)
         _ensure_service_user(result, dry_run=True)
         return result
 
@@ -257,7 +358,7 @@ def apply_elevate(
     _save_state(state_file, state)
     result.actions.append(f"saved previous state -> {state_file}")
 
-    _write_file(DROPIN_PATH, render_dropin(), 0o644)
+    _write_file(DROPIN_PATH, render_dropin(profile), 0o644)
     result.actions.append(f"wrote systemd drop-in {DROPIN_PATH}")
 
     try:
@@ -267,8 +368,10 @@ def apply_elevate(
         result.warnings.append(f"polkit rule not written ({exc}); DNS monitor may still need root")
 
     result.actions.append(
-        "granted ambient capabilities: " + ", ".join(ELEVATE_CAPS)
+        f"granted ambient capabilities ({profile}): " + ", ".join(caps)
     )
+    if profile == "attribution":
+        result.warnings.append(_ATTRIBUTION_WARNING)
     result.actions.append(
         "did NOT grant: sudoers, setuid, CAP_SETUID, CAP_SYS_ADMIN, interactive login"
     )

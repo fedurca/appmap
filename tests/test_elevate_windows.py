@@ -154,6 +154,82 @@ class ElevateWindowsApplyRevokeTest(unittest.TestCase):
         self.assertIn("DOMAIN\\svc-collector", creates[-1])
         self.assertNotIn("SYSTEM", creates[-1])
 
+    def test_sedebug_not_granted_by_default(self):
+        """SEC-022: SeDebugPrivilege is a reliable escalation to SYSTEM.
+
+        winprocess._image_path opens processes with
+        PROCESS_QUERY_LIMITED_INFORMATION and calls
+        QueryFullProcessImageNameW, which works cross-user without it.
+        """
+
+        with mock.patch.object(ew, "_find_ntrights", return_value="C:\\ntrights.exe"):
+            result = ew.apply_elevate(state_file=self.state, dry_run=False)
+        self.assertTrue(result.ok)
+        granted = [c for c in self.calls if c and "SeDebugPrivilege" in c]
+        self.assertFalse(granted, "SeDebugPrivilege must not be granted by default")
+        self.assertTrue(any("did NOT grant SeDebugPrivilege" in a for a in result.actions))
+        with open(self.state, encoding="utf-8") as fh:
+            self.assertFalse(json.loads(fh.read())["sedebug_granted"])
+
+    def test_sedebug_opt_in_is_recorded_and_warned(self):
+        with mock.patch.object(ew, "_find_ntrights", return_value="C:\\ntrights.exe"):
+            result = ew.apply_elevate(
+                state_file=self.state, dry_run=False, allow_sedebug=True
+            )
+        self.assertTrue(result.ok)
+        granted = [c for c in self.calls if c and "SeDebugPrivilege" in c and "+r" in c]
+        self.assertTrue(granted, "opt-in must actually grant the privilege")
+        with open(self.state, encoding="utf-8") as fh:
+            self.assertTrue(json.loads(fh.read())["sedebug_granted"])
+        self.assertTrue(any("escalation" in w for w in result.warnings))
+
+    def test_attribution_uses_limited_information_right(self):
+        """The narrow default is only defensible if the code really uses it."""
+
+        from commatrix.platform.win import winprocess
+
+        self.assertEqual(winprocess._PROCESS_QUERY_LIMITED_INFORMATION, 0x1000)
+        import inspect
+
+        src = inspect.getsource(winprocess._image_path)
+        self.assertIn("_PROCESS_QUERY_LIMITED_INFORMATION", src)
+        self.assertNotIn("PROCESS_ALL_ACCESS", src)
+
+    def test_revoke_takes_back_sedebug_when_granted(self):
+        with open(self.state, "w", encoding="utf-8") as fh:
+            json.dump({
+                "version": 1,
+                "user_created": False,
+                "previous_run_as": "SYSTEM",
+                "sedebug_granted": True,
+            }, fh)
+        self.calls.clear()
+        with mock.patch.object(ew, "_find_ntrights", return_value="C:\\ntrights.exe"):
+            result = ew.revoke_elevate(state_file=self.state, dry_run=False)
+        self.assertTrue(result.ok)
+        revoked = [c for c in self.calls if "SeDebugPrivilege" in c and "-r" in c]
+        if revoked:
+            self.assertIn(ew.SERVICE_USER, revoked[0])
+        else:
+            # ntrights is absent in this mock; the operator must then be told
+            # to remove it by hand rather than left believing it is gone.
+            self.assertTrue(
+                any("SeDebugPrivilege" in w for w in result.warnings),
+                "revoke must not silently leave SeDebugPrivilege in place",
+            )
+
+    def test_revoke_says_nothing_about_sedebug_when_never_granted(self):
+        with open(self.state, "w", encoding="utf-8") as fh:
+            json.dump({
+                "version": 1,
+                "user_created": False,
+                "previous_run_as": "SYSTEM",
+                "sedebug_granted": False,
+            }, fh)
+        result = ew.revoke_elevate(state_file=self.state, dry_run=False)
+        self.assertTrue(result.ok)
+        self.assertFalse(any("SeDebugPrivilege" in w for w in result.warnings))
+
     def test_apply_requires_admin(self):
         with mock.patch("commatrix.platform.win.runtime.is_admin", return_value=False):
             result = ew.apply_elevate(state_file=self.state, dry_run=False)

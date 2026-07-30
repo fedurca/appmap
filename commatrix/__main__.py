@@ -166,7 +166,9 @@ def cmd_elevate_linux(args: argparse.Namespace) -> int:
     if args.revoke:
         result = revoke_elevate(state_file=state, dry_run=args.dry_run)
     else:
-        result = apply_elevate(state_file=state, dry_run=args.dry_run)
+        result = apply_elevate(
+            state_file=state, dry_run=args.dry_run, profile=args.profile
+        )
     _write_output(result.summary_markdown(), args.output)
     return 0 if result.ok else 1
 
@@ -189,6 +191,7 @@ def cmd_elevate_windows(args: argparse.Namespace) -> int:
             state_file=args.state_file,
             dry_run=args.dry_run,
             config_path=args.config,
+            allow_sedebug=args.allow_sedebug,
         )
     _write_output(result.summary_markdown(), args.output)
     return 0 if result.ok else 1
@@ -543,23 +546,43 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_elev_l = sub.add_parser(
         "elevate-linux",
-        help="grant ambient caps + polkit DNS to the service user (no root path)",
+        help="grant ambient caps + polkit DNS to the service user",
     )
     _add_common(p_elev_l)
     p_elev_l.add_argument("--revoke", action="store_true", help="restore previous privileges")
     p_elev_l.add_argument("--dry-run", action="store_true", help="show actions without changing the host")
     p_elev_l.add_argument("--state-file", help="path to elevate state JSON")
+    p_elev_l.add_argument(
+        "--profile",
+        choices=("topology", "attribution"),
+        default="attribution",
+        help="capability profile. 'topology' grants only CAP_NET_ADMIN and "
+        "CAP_NET_RAW: flows and services are still collected, but processes "
+        "owned by other users are not attributed. 'attribution' (default) "
+        "adds CAP_DAC_READ_SEARCH + CAP_SYS_PTRACE, which together are "
+        "read-equivalent to root over the whole host",
+    )
     p_elev_l.add_argument("-o", "--output", help="write markdown summary to file")
     p_elev_l.set_defaults(func=cmd_elevate_linux)
 
     p_elev_w = sub.add_parser(
         "elevate-windows",
-        help="dedicated service user + Event Log/SeDebug (no Administrators)",
+        help="dedicated service user + Event Log access (no Administrators)",
     )
     _add_common(p_elev_w)
     p_elev_w.add_argument("--revoke", action="store_true", help="restore previous privileges")
     p_elev_w.add_argument("--dry-run", action="store_true", help="show actions without changing the host")
     p_elev_w.add_argument("--state-file", help="path to elevate state JSON")
+    p_elev_w.add_argument(
+        "--allow-sedebug",
+        dest="allow_sedebug",
+        action="store_true",
+        help="also grant SeDebugPrivilege. Off by default: it permits "
+        "OpenProcess(PROCESS_ALL_ACCESS) on SYSTEM processes and is a "
+        "reliable escalation to SYSTEM. Attribution uses "
+        "PROCESS_QUERY_LIMITED_INFORMATION and does not need it; enable only "
+        "to attribute protected (PPL) processes",
+    )
     p_elev_w.add_argument("-o", "--output", help="write markdown summary to file")
     p_elev_w.set_defaults(func=cmd_elevate_windows)
 

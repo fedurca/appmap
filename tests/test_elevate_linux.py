@@ -29,6 +29,85 @@ class ElevateLinuxRenderTest(unittest.TestCase):
         self.assertIn("org.freedesktop.resolve1", text)
 
 
+class CapabilityProfileTest(unittest.TestCase):
+    """SEC-005/006: the two attribution caps are only useful as a pair.
+
+    Measured on a live kernel: CAP_DAC_READ_SEARCH alone can listdir
+    /proc/PID/fd but cannot readlink the entries; CAP_SYS_PTRACE alone cannot
+    even listdir. So 'topology' must drop both, and 'attribution' must carry
+    both or it silently degrades.
+    """
+
+    def test_topology_drops_both_attribution_caps(self):
+        caps = el.CAP_PROFILES["topology"]
+        self.assertNotIn("CAP_SYS_PTRACE", caps)
+        self.assertNotIn("CAP_DAC_READ_SEARCH", caps)
+        self.assertIn("CAP_NET_ADMIN", caps)
+
+    def test_attribution_carries_both_or_neither(self):
+        caps = el.CAP_PROFILES["attribution"]
+        self.assertIn("CAP_SYS_PTRACE", caps)
+        self.assertIn("CAP_DAC_READ_SEARCH", caps)
+
+    def test_no_profile_grants_an_execution_primitive(self):
+        for name, caps in el.CAP_PROFILES.items():
+            for forbidden in ("CAP_SETUID", "CAP_SETGID", "CAP_SYS_ADMIN", "CAP_SYS_MODULE"):
+                self.assertNotIn(forbidden, caps, f"{forbidden} in profile {name}")
+
+    def test_attribution_dropin_confines_the_caps(self):
+        text = el.render_dropin("attribution")
+        self.assertIn("SystemCallFilter=~@debug ptrace", text)
+        self.assertIn("ProtectHome=tmpfs", text)
+        self.assertIn("InaccessiblePaths=", text)
+        self.assertIn("NoNewPrivileges=true", text)
+
+    def test_topology_dropin_needs_no_confinement(self):
+        text = el.render_dropin("topology")
+        self.assertNotIn("SystemCallFilter", text)
+        self.assertNotIn("CAP_SYS_PTRACE", text)
+
+    def test_dropin_records_the_profile(self):
+        for name in el.CAP_PROFILES:
+            self.assertIn(f"Capability profile: {name}", el.render_dropin(name))
+
+    def test_unknown_profile_is_rejected(self):
+        result = el.apply_elevate(profile="wide-open", dry_run=True)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("unknown capability profile" in e for e in result.errors))
+
+    def test_attribution_warns_about_residual_risk(self):
+        with mock.patch.object(el, "_is_root", return_value=True), \
+             mock.patch.object(el, "_ensure_service_user"):
+            result = el.apply_elevate(profile="attribution", dry_run=True)
+        self.assertTrue(any("read-equivalent to root" in w for w in result.warnings))
+
+    def test_topology_does_not_warn(self):
+        with mock.patch.object(el, "_is_root", return_value=True), \
+             mock.patch.object(el, "_ensure_service_user"):
+            result = el.apply_elevate(profile="topology", dry_run=True)
+        self.assertFalse(any("read-equivalent" in w for w in result.warnings))
+
+
+class PolkitScopeTest(unittest.TestCase):
+    """SEC-008: the rule must not authorize the whole resolve1 namespace."""
+
+    def test_rule_is_an_explicit_allowlist(self):
+        text = el.render_polkit()
+        self.assertNotIn('indexOf("org.freedesktop.resolve1")', text)
+        self.assertIn("allowed.indexOf(action.id)", text)
+
+    def test_mutating_actions_are_not_listed(self):
+        for action in (
+            "org.freedesktop.resolve1.set-dns-servers",
+            "org.freedesktop.resolve1.set-dns-over-tls",
+            "org.freedesktop.resolve1.revert",
+        ):
+            self.assertNotIn(action, el.render_polkit())
+
+    def test_subscription_action_is_listed(self):
+        self.assertIn("subscribe-query-results", el.render_polkit())
+
+
 class ElevateLinuxApplyRevokeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

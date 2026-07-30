@@ -1,12 +1,22 @@
 """Least-privilege elevation for the Windows collector service account.
 
 Creates/reuses a dedicated local user (no Administrators membership), grants
-Event Log Readers + SeDebugPrivilege for process attribution and DNS visibility,
-rebinds the scheduled task away from SYSTEM, and persists state for revoke.
+Event Log Readers for DNS visibility, rebinds the scheduled task away from
+SYSTEM, and persists state for revoke.
 
-Deliberately does NOT grant Administrators, SeImpersonatePrivilege, or
-SeAssignPrimaryTokenPrivilege. SNI (SIO_RCVALL) still needs Admin/SYSTEM and is
-not promised by elevate-windows.
+Deliberately does NOT grant Administrators, SeImpersonatePrivilege,
+SeAssignPrimaryTokenPrivilege, or -- since SEC-022 -- SeDebugPrivilege.
+SeDebugPrivilege permits OpenProcess(PROCESS_ALL_ACCESS) against SYSTEM
+processes and hence WriteProcessMemory/CreateRemoteThread, which is a reliable
+local escalation to SYSTEM: the Windows counterpart of CAP_SYS_PTRACE. It is
+not needed for attribution, because winprocess._image_path opens processes
+with PROCESS_QUERY_LIMITED_INFORMATION and calls QueryFullProcessImageNameW,
+which succeeds against other users' processes without it. Callers that need to
+attribute protected (PPL) processes can opt in with allow_sedebug=True and
+accept the residual risk.
+
+SNI (SIO_RCVALL) still needs Admin/SYSTEM and is not promised by
+elevate-windows.
 """
 
 from __future__ import annotations
@@ -169,16 +179,26 @@ def _add_to_event_log_readers(result: ElevateResult, dry_run: bool) -> None:
             result.warnings.append(f"Event Log Readers: {msg or 'failed'}")
 
 
+def _find_ntrights() -> Optional[str]:
+    """Locate ntrights.exe, or None. Shared by the grant and revoke paths."""
+
+    try:
+        found = _run(["where", "ntrights"])
+    except Exception:  # noqa: BLE001 - _run is mocked in tests
+        return None
+    if found.returncode == 0 and (found.stdout or "").strip():
+        return (found.stdout or "").strip().splitlines()[0]
+    return None
+
+
 def _grant_se_debug(result: ElevateResult, dry_run: bool) -> None:
-    """Grant SeDebugPrivilege via temporary secedit inf (stdlib-only path)."""
+    """Grant SeDebugPrivilege via ntrights (stdlib-only path)."""
 
     if dry_run:
         result.actions.append("[dry-run] would grant SeDebugPrivilege to service user")
         return
-    # Best-effort: use ntrights if present; otherwise document manual grant.
-    ntrights = _run(["where", "ntrights"])
-    if ntrights.returncode == 0 and (ntrights.stdout or "").strip():
-        exe = (ntrights.stdout or "").strip().splitlines()[0]
+    exe = _find_ntrights()
+    if exe:
         proc = _run([exe, "+r", "SeDebugPrivilege", "-u", SERVICE_USER])
         if proc.returncode == 0:
             result.actions.append("granted SeDebugPrivilege via ntrights")
@@ -298,11 +318,25 @@ def _rebind_task(
     )
 
 
+SEDEBUG_RATIONALE = (
+    "SeDebugPrivilege is NOT granted by default (SEC-022). It allows "
+    "OpenProcess(PROCESS_ALL_ACCESS) against SYSTEM processes and therefore "
+    "WriteProcessMemory/CreateRemoteThread, i.e. a reliable local escalation "
+    "to SYSTEM -- the Windows equivalent of CAP_SYS_PTRACE. This collector's "
+    "attribution path (winprocess._image_path) opens processes with "
+    "PROCESS_QUERY_LIMITED_INFORMATION and calls QueryFullProcessImageNameW, "
+    "which works against other users' processes without it. Pass "
+    "allow_sedebug=True only if you need to attribute protected (PPL) or "
+    "hardened SYSTEM processes and accept the escalation risk."
+)
+
+
 def apply_elevate(
     *,
     state_file: Optional[str] = None,
     dry_run: bool = False,
     config_path: Optional[str] = None,
+    allow_sedebug: bool = False,
 ) -> ElevateResult:
     from . import runtime
 
@@ -318,7 +352,13 @@ def apply_elevate(
         result.actions.append(f"[dry-run] would write state -> {state_path}")
         _ensure_user(result, dry_run=True)
         _add_to_event_log_readers(result, dry_run=True)
-        _grant_se_debug(result, dry_run=True)
+        if allow_sedebug:
+            _grant_se_debug(result, dry_run=True)
+            result.warnings.append(SEDEBUG_RATIONALE)
+        else:
+            result.actions.append(
+                "[dry-run] would NOT grant SeDebugPrivilege (default)"
+            )
         _enable_dns_channel(result, dry_run=True)
         _secure_data_dir(result, dry_run=True)
         _rebind_task(result, password=None, dry_run=True, config_path=config_path)
@@ -355,6 +395,7 @@ def apply_elevate(
         "previous_task_command": prev_cmd,
         "user_created": prev_user_created,
         "dns_channel": DNS_CHANNEL,
+        "sedebug_granted": bool(allow_sedebug),
     }
 
     existed = _user_exists(SERVICE_USER)
@@ -369,7 +410,14 @@ def apply_elevate(
     result.actions.append(f"saved previous state -> {state_path}")
 
     _add_to_event_log_readers(result, dry_run=False)
-    _grant_se_debug(result, dry_run=False)
+    if allow_sedebug:
+        _grant_se_debug(result, dry_run=False)
+        result.warnings.append(SEDEBUG_RATIONALE)
+    else:
+        result.actions.append(
+            "did NOT grant SeDebugPrivilege; attribution uses "
+            "PROCESS_QUERY_LIMITED_INFORMATION, which does not require it"
+        )
     _enable_dns_channel(result, dry_run=False)
     _secure_data_dir(result, dry_run=False)
     _rebind_task(
@@ -431,6 +479,26 @@ def revoke_elevate(
         result.warnings.append(
             f"could not restore task as {run_as}: {(create.stderr or '').strip()}"
         )
+
+    # If SeDebugPrivilege was granted, take it back explicitly. Deleting the
+    # account would drop it too, but the account is only deleted when *we*
+    # created it -- on a pre-existing account the privilege would linger.
+    if state.get("sedebug_granted"):
+        exe = _find_ntrights()
+        if exe:
+            proc = _run([exe, "-r", "SeDebugPrivilege", "-u", SERVICE_USER])
+            if proc.returncode == 0:
+                result.actions.append("revoked SeDebugPrivilege")
+            else:
+                result.warnings.append(
+                    "could not revoke SeDebugPrivilege; remove it from "
+                    f"'{SERVICE_USER}' via Local Security Policy"
+                )
+        else:
+            result.warnings.append(
+                "ntrights unavailable: remove SeDebugPrivilege from "
+                f"'{SERVICE_USER}' manually via Local Security Policy"
+            )
 
     if state.get("user_created"):
         proc = _run(["net", "user", SERVICE_USER, "/delete"])
