@@ -104,7 +104,8 @@ Cmnd_Alias COMMATRIX_CTL = \\
     $SYSTEMCTL_BIN disable $UNIT, \\
     $SYSTEMCTL_BIN enable --now $UNIT, \\
     $SYSTEMCTL_BIN disable --now $UNIT, \\
-    $JOURNALCTL_BIN -u $UNIT *
+    $JOURNALCTL_BIN --no-pager -u $UNIT -n 200, \\
+    $JOURNALCTL_BIN --no-pager -u $UNIT -f
 $TARGET_USER ALL=(root) NOPASSWD: COMMATRIX_CTL
 EOF
 chmod 0440 "$tmp_sudoers"
@@ -147,11 +148,18 @@ set -euo pipefail
 UNIT="$UNIT"
 usage() { echo "usage: commatrix-ctl {start|stop|restart|status|enable|disable|logs|follow}"; exit 1; }
 cmd="\${1:-}"; shift || true
+# The sudoers grant is an exact-match allowlist (no wildcards, so no journalctl
+# pager escape and no --file). Extra arguments would never match it, so reject
+# them here rather than failing later with a confusing sudo error.
+if [ "\$#" -gt 0 ]; then
+  echo "commatrix-ctl: '\$cmd' takes no extra arguments (got: \$*)" >&2
+  exit 1
+fi
 case "\$cmd" in
   start|stop|restart|enable|disable)  exec sudo -n systemctl "\$cmd" "\$UNIT" ;;
   status)                             exec systemctl --no-pager status "\$UNIT" ;;
-  logs)                               exec sudo -n journalctl -u "\$UNIT" --no-pager "\$@" ;;
-  follow)                             exec sudo -n journalctl -u "\$UNIT" -f ;;
+  logs)                               exec sudo -n journalctl --no-pager -u "\$UNIT" -n 200 ;;
+  follow)                             exec sudo -n journalctl --no-pager -u "\$UNIT" -f ;;
   *) usage ;;
 esac
 EOF

@@ -37,14 +37,23 @@ log()  { printf '\033[1;32m[commatrix]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[commatrix]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[commatrix]\033[0m %s\n' "$*" >&2; exit 1; }
 
+require_percent() {
+  case "$2" in
+    ''|*[!0-9]*) die "$1 must be a whole number 1-100 (got: $2)" ;;
+  esac
+  if [ "$2" -lt 1 ] || [ "$2" -gt 100 ]; then
+    die "$1 must be between 1 and 100 (got: $2)"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) USER_MODE=1 ;;
     --as-root) AS_ROOT=1; RUN_USER="root" ;;
     --uninstall) UNINSTALL=1 ;;
     --no-start) NO_START=1 ;;
-    --cpu-percent) CPU_PERCENT="${2:?}"; shift ;;
-    --disk-percent) DISK_PERCENT="${2:?}"; shift ;;
+    --cpu-percent) require_percent --cpu-percent "${2:?}"; CPU_PERCENT="$2"; shift ;;
+    --disk-percent) require_percent --disk-percent "${2:?}"; DISK_PERCENT="$2"; shift ;;
     -h|--help)
       sed -n '2,25p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;

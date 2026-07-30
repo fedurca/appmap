@@ -16,9 +16,17 @@
 
 set -euo pipefail
 
-APPMAP_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_LOG="${APPMAP_ROOT}/commatrix-lab-env.log"
-ENV_STATE="${APPMAP_ROOT}/.commatrix-lab-env.state"
+# Rewritten by install-lab-sudoers.sh in the installed root-owned copy. Empty
+# means "run from the checkout" (developer use, not via sudo).
+COMMATRIX_SRC=""
+APPMAP_ROOT="${COMMATRIX_SRC:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# State and logs live under /var/lib, never next to the code: the code
+# directory must stay root-owned and non-writable (see require_root_owned).
+STATE_DIR="/var/lib/commatrix"
+ENV_LOG="${STATE_DIR}/commatrix-lab-env.log"
+ENV_STATE="${STATE_DIR}/.commatrix-lab-env.state"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 SYSCTL_KEYS=(
     net.netfilter.nf_conntrack_acct
@@ -141,46 +149,69 @@ cmd_setup_conntrack() {
     esac
 }
 
-run_collect() {
-    local once=0
-    if [ "${1:-}" = "--once-internal" ]; then
-        once=1
-        shift
-    fi
+# Root-owned, fixed locations. Never taken from the caller: this script runs
+# as root via a passwordless sudo grant, and `commatrix collect --config <ini>`
+# would honour an attacker-supplied INI whose zabbix_get key is executed as
+# root, while --database is an arbitrary root-owned file write.
+LAB_CONF="/etc/commatrix/commatrix.conf"
+LAB_DB="/var/lib/commatrix/commatrix.db"
 
-    save_environment "collect once=${once} args=$*"
+require_root_owned() {
+    # sudo does not check who owns the code it runs. If this script, or the
+    # tree we add to PYTHONPATH, is writable by a non-root user, then the
+    # sudoers grant is unconditional root for that user regardless of how
+    # carefully the arguments below are handled.
+    local path="$1" label="$2" owner perms
+    owner="$(stat -c '%u' "$path")"
+    perms="$(stat -c '%a' "$path")"
+    if [ "$owner" -ne 0 ]; then
+        echo "refusing to run: ${label} (${path}) is not owned by root" >&2
+        echo "install it to a root-owned path first (see install-lab-sudoers.sh)" >&2
+        exit 3
+    fi
+    if [ $(( 8#$perms & 8#0022 )) -ne 0 ]; then
+        echo "refusing to run: ${label} (${path}) is group- or world-writable" >&2
+        exit 3
+    fi
+}
+
+run_collect() {
+    local once="$1"
+
+    require_root_owned "${BASH_SOURCE[0]}" "helper script"
+    require_root_owned "${APPMAP_ROOT}" "commatrix source tree"
+
+    save_environment "collect once=${once}"
     trap 'restore_environment' EXIT INT TERM
 
     load_modules
     apply_sysctls
     local backend
     backend="$(detect_backend)"
-    log_env "collect starting backend=${backend} once=${once} args=$*"
+    log_env "collect starting backend=${backend} once=${once}"
 
     export PYTHONPATH="${APPMAP_ROOT}:${PYTHONPATH:-}"
     if [ "$once" -eq 1 ]; then
-        python3 -m commatrix collect --once "$@"
+        python3 -m commatrix collect --once --config "$LAB_CONF" --database "$LAB_DB"
     else
-        python3 -m commatrix collect "$@"
+        python3 -m commatrix collect --config "$LAB_CONF" --database "$LAB_DB"
     fi
 }
 
-cmd_collect() {
-    run_collect "$@"
-}
-
-cmd_collect_once() {
-    run_collect --once-internal "$@"
-}
-
 usage() {
-    echo "Usage: $0 {setup-conntrack|collect|collect-once} [args...]" >&2
+    echo "Usage: $0 {setup-conntrack|collect|collect-once}" >&2
+    echo "Takes no further arguments; config and database are fixed to" >&2
+    echo "  ${LAB_CONF} / ${LAB_DB}" >&2
     exit 2
 }
 
-case "${1:-}" in
-    setup-conntrack) shift; cmd_setup_conntrack "$@" ;;
-    collect)         shift; cmd_collect "$@" ;;
-    collect-once)    shift; cmd_collect_once "$@" ;;
+# No argument passthrough: the sudoers grant is an exact-match allowlist and
+# anything beyond the subcommand is rejected here as well.
+[ "$#" -eq 1 ] || usage
+
+case "$1" in
+    setup-conntrack) cmd_setup_conntrack ;;
+    collect)         run_collect 0 ;;
+    collect-once)    run_collect 1 ;;
     *)               usage ;;
 esac
