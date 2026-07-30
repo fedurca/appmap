@@ -1,12 +1,39 @@
 [Unit]
 Description=Commatrix snapshot export/push to central collector
-Documentation=https://example.com/commatrix
+Documentation=https://github.com/fedurca/appmap
 After=commatrix-collector.service
 
 [Service]
 Type=oneshot
-User=root
+# Export only reads the local database and writes a snapshot, so it must not
+# run as root. The collector already creates /var/lib/commatrix as 0750
+# commatrix:commatrix.
+User=commatrix
+Group=commatrix
+
 # Either write a snapshot to disk (for ssh/rsync pull) ...
 ExecStart=/usr/bin/commatrix export --config /etc/commatrix/commatrix.conf -o /var/lib/commatrix/snapshots/%H.json
-# ... or push directly to a central collector (uncomment and set the URL):
-# ExecStart=/usr/bin/commatrix push --config /etc/commatrix/commatrix.conf --server http://central.example.com:8899 --token CHANGEME
+
+# ... or push directly to a central collector. Uncomment both lines below and
+# put the token in the environment file, never in ExecStart: unit files are
+# world-readable, so a token here leaks to every local user.
+#
+#   printf 'COMMATRIX_TOKEN=%s\n' "$(cat /path/to/shared-token)" \
+#       > /etc/commatrix/push.env
+#   chown root:commatrix /etc/commatrix/push.env
+#   chmod 0640 /etc/commatrix/push.env
+#
+# EnvironmentFile=/etc/commatrix/push.env
+# ExecStart=/usr/bin/commatrix push --config /etc/commatrix/commatrix.conf --server https://central.example.com:8899
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+UMask=0027
+StateDirectory=commatrix
+StateDirectoryMode=0750

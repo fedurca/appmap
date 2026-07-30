@@ -1,20 +1,55 @@
 [Unit]
 Description=Commatrix central collector server (HTTP snapshot ingest)
-Documentation=https://example.com/commatrix
+Documentation=https://github.com/fedurca/appmap
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# The central server does not need root; run as a dedicated user in production.
+# The central server does not need root.
 User=commatrix
-ExecStart=/usr/bin/commatrix serve --database /var/lib/commatrix/central.db --host 0.0.0.0 --port 8899
+Group=commatrix
+
+# The shared token MUST come from this file, not from ExecStart: anything on
+# the command line is visible to every local user via ps and /proc, and unit
+# files themselves are world-readable. Create it before enabling the unit:
+#
+#   install -d -m 0750 -o commatrix -g commatrix /etc/commatrix
+#   printf 'COMMATRIX_TOKEN=%s\n' "$(openssl rand -hex 32)" \
+#       > /etc/commatrix/server.env
+#   chown root:commatrix /etc/commatrix/server.env
+#   chmod 0640 /etc/commatrix/server.env
+#
+# commatrix serve refuses to start without a token, so a missing or empty file
+# fails the unit rather than silently exposing an unauthenticated /ingest.
+EnvironmentFile=/etc/commatrix/server.env
+
+# Bound to loopback by default. /ingest is an authoritative write into the
+# central database, so only widen this once the port is firewalled to your
+# collectors -- and keep the token either way.
+ExecStart=/usr/bin/commatrix serve --database /var/lib/commatrix/central.db --host 127.0.0.1 --port 8899
+
 Restart=on-failure
 RestartSec=5
+
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0027
 StateDirectory=commatrix
+StateDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target
