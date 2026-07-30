@@ -16,7 +16,7 @@ import ipaddress
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 _PKG_SIGNATURE_DIR = os.path.join(os.path.dirname(__file__), "signatures")
 

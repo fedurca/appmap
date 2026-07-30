@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import socket as _socket
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # TCP connection states as reported in /proc/net/tcp (hex).
 TCP_STATES = {

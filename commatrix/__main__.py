@@ -345,15 +345,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         elif fmt == "markdown":
             text = rp.matrix_markdown(store, args.host)
         elif fmt == "mermaid":
-            text = rp.topology_mermaid(store)
+            text = rp.topology_mermaid(store, args.host)
         elif fmt == "dot":
-            text = rp.topology_dot(store)
+            text = rp.topology_dot(store, args.host)
         elif fmt == "catalog":
-            text = rp.catalog_json(store)
+            text = rp.catalog_json(store, args.host)
         elif fmt == "sheets":
-            text = rp.service_sheets(store)
+            text = rp.service_sheets(store, args.host)
         elif fmt == "security":
-            text = rp.security_markdown(store)
+            text = rp.security_markdown(store, args.host)
         elif fmt == "html":
             text = rp.report_html(store, args.host)
         else:  # pragma: no cover - argparse restricts choices

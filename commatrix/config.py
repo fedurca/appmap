@@ -26,6 +26,7 @@ Example ``/etc/commatrix/commatrix.conf``::
 from __future__ import annotations
 
 import configparser
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -46,6 +47,8 @@ DEFAULT_INTERNAL_CIDRS = [
     "fe80::/10",
     "::1/128",
 ]
+
+log = logging.getLogger("commatrix.config")
 
 
 @dataclass
@@ -132,6 +135,33 @@ class Config:
         return self.min_free_disk_percent / 100.0
 
 
+def _typed(sec, key, default, kind, section):
+    """Read one typed config value, falling back to the default on garbage.
+
+    CODE-021: configparser's getfloat/getint/getboolean raise ValueError on a
+    malformed value, and nothing caught it -- so a single typo such as
+    ``require_root = enabled`` stopped the collector from starting at all,
+    with a traceback rather than a diagnosis. A bad value now degrades to the
+    default and says so.
+    """
+
+    if key not in sec:
+        return default
+    try:
+        if kind == "float":
+            return sec.getfloat(key, default)
+        if kind == "int":
+            return sec.getint(key, default)
+        if kind == "bool":
+            return sec.getboolean(key, default)
+    except ValueError:
+        log.warning(
+            "config [%s] %s=%r is not a valid %s; using default %r",
+            section, key, sec.get(key), kind, default,
+        )
+    return default
+
+
 def _split_list(value: str) -> List[str]:
     parts = []
     for chunk in value.replace("\n", ",").split(","):
@@ -156,25 +186,38 @@ def load_config(path: Optional[str] = None) -> Config:
     else:
         candidate_paths.extend(DEFAULT_CONFIG_PATHS)
 
-    read = parser.read([p for p in candidate_paths if os.path.exists(p)])
+    existing = [p for p in candidate_paths if os.path.exists(p)]
+    read = parser.read(existing)
+    # CODE-022: configparser silently skips a file it cannot open, so an
+    # unreadable /etc/commatrix/commatrix.conf looked exactly like "no config"
+    # and the collector came up on defaults -- wrong database, wrong budgets,
+    # no clue why. Say something.
+    for candidate in existing:
+        if candidate not in read:
+            log.warning(
+                "config %s exists but could not be read (permissions?); "
+                "continuing with defaults for its settings", candidate
+            )
     if not read:
+        if path:
+            log.warning("config %s not found or unreadable; using defaults", path)
         return cfg
 
     if parser.has_section("collector"):
         sec = parser["collector"]
-        cfg.poll_interval = sec.getfloat("poll_interval", cfg.poll_interval)
+        cfg.poll_interval = _typed(sec, "poll_interval", cfg.poll_interval, "float", "collector")
         cfg.database = sec.get("database", cfg.database)
         cfg.source = sec.get("source", cfg.source)
         cfg.hostname = sec.get("hostname", cfg.hostname)
         cfg.sysctl_state_file = sec.get("sysctl_state_file", cfg.sysctl_state_file)
-        cfg.require_root = sec.getboolean("require_root", cfg.require_root)
-        cfg.event_min_gap_seconds = sec.getfloat("event_min_gap_seconds", cfg.event_min_gap_seconds)
+        cfg.require_root = _typed(sec, "require_root", cfg.require_root, "bool", "collector")
+        cfg.event_min_gap_seconds = _typed(sec, "event_min_gap_seconds", cfg.event_min_gap_seconds, "float", "collector")
 
     if parser.has_section("network"):
         sec = parser["network"]
         if "internal_cidrs" in sec:
             cfg.internal_cidrs = _split_list(sec["internal_cidrs"])
-        cfg.resolve_external = sec.getboolean("resolve_external", cfg.resolve_external)
+        cfg.resolve_external = _typed(sec, "resolve_external", cfg.resolve_external, "bool", "network")
 
     if parser.has_section("zabbix"):
         sec = parser["zabbix"]
@@ -185,7 +228,7 @@ def load_config(path: Optional[str] = None) -> Config:
     if parser.has_section("export"):
         sec = parser["export"]
         cfg.snapshot_dir = sec.get("snapshot_dir", cfg.snapshot_dir)
-        cfg.html_report = sec.getboolean("html_report", cfg.html_report)
+        cfg.html_report = _typed(sec, "html_report", cfg.html_report, "bool", "export")
         cfg.html_report_path = sec.get("html_report_path", cfg.html_report_path)
 
     if parser.has_section("signatures"):
@@ -194,8 +237,8 @@ def load_config(path: Optional[str] = None) -> Config:
 
     if parser.has_section("dns"):
         sec = parser["dns"]
-        cfg.dns_enabled = sec.getboolean("enabled", cfg.dns_enabled)
-        cfg.dns_enrich_flows = sec.getboolean("enrich_flows", cfg.dns_enrich_flows)
+        cfg.dns_enabled = _typed(sec, "enabled", cfg.dns_enabled, "bool", "dns")
+        cfg.dns_enrich_flows = _typed(sec, "enrich_flows", cfg.dns_enrich_flows, "bool", "dns")
 
     if parser.has_section("time"):
         sec = parser["time"]
@@ -208,17 +251,17 @@ def load_config(path: Optional[str] = None) -> Config:
 
     if parser.has_section("sni"):
         sec = parser["sni"]
-        cfg.sni_enabled = sec.getboolean("enabled", cfg.sni_enabled)
+        cfg.sni_enabled = _typed(sec, "enabled", cfg.sni_enabled, "bool", "sni")
         cfg.sni_interface = sec.get("interface", cfg.sni_interface) or None
         if "ports" in sec:
             cfg.sni_ports = [int(p) for p in _split_list(sec["ports"]) if p.isdigit()]
 
     if parser.has_section("resources"):
         sec = parser["resources"]
-        cfg.cpu_budget_percent = sec.getfloat("cpu_budget_percent", cfg.cpu_budget_percent)
-        cfg.disk_budget_percent = sec.getfloat("disk_budget_percent", cfg.disk_budget_percent)
-        cfg.min_free_disk_percent = sec.getfloat("min_free_disk_percent", cfg.min_free_disk_percent)
-        cfg.retention_days = sec.getfloat("retention_days", cfg.retention_days)
-        cfg.memory_max_mb = sec.getint("memory_max_mb", cfg.memory_max_mb)
+        cfg.cpu_budget_percent = _typed(sec, "cpu_budget_percent", cfg.cpu_budget_percent, "float", "resources")
+        cfg.disk_budget_percent = _typed(sec, "disk_budget_percent", cfg.disk_budget_percent, "float", "resources")
+        cfg.min_free_disk_percent = _typed(sec, "min_free_disk_percent", cfg.min_free_disk_percent, "float", "resources")
+        cfg.retention_days = _typed(sec, "retention_days", cfg.retention_days, "float", "resources")
+        cfg.memory_max_mb = _typed(sec, "memory_max_mb", cfg.memory_max_mb, "int", "resources")
 
     return cfg

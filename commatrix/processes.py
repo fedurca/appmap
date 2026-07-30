@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 _SYSTEMD_UNIT_RE = re.compile(r"/([\w@.\-\\]+\.(?:service|scope|socket|mount|slice))")

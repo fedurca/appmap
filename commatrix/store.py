@@ -15,13 +15,22 @@ poll.  "Activity" (a positive byte/packet delta or a re-appearance) drives the
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
+log = logging.getLogger("commatrix.store")
+
 SCHEMA_VERSION = 4
+
+# The columns that make up the flows UNIQUE key. A snapshot row missing any of
+# them cannot be merged meaningfully.
+_FLOW_KEY_COLUMNS = (
+    "host", "proto", "direction", "local_ip", "peer_ip", "service_port",
+)
 
 # Restrictive permissions: the database is a full internal network map and must
 # not be world-readable.
@@ -172,6 +181,11 @@ class Store:
         read_only: bool = False,
         event_min_gap: float = 60.0,
     ):
+        # When set, record_edge() skips its own commit so a whole poll lands in
+        # a single transaction (see record_edges). One fsync per edge made a
+        # poll cost thousands of them; measured ~40x slower on a fast SSD and
+        # far worse on a throttled VPS, which broke the CPU budget promise.
+        self._batching = False
         self.path = path
         self.read_only = read_only
         # Only log a "reactivated" IR event when an edge resumes activity after
@@ -239,6 +253,17 @@ class Store:
             self.conn.execute("ALTER TABLE flows ADD COLUMN pod TEXT")
         if "netns" not in cols:
             self.conn.execute("ALTER TABLE flows ADD COLUMN netns TEXT")
+
+        # CODE-002: retention pruning runs every poll and filters on
+        # last_seen, which was a full table scan of every flow on every cycle
+        # (measured 13.25 ms vs 0.01 ms per prune at 200k rows). Created here
+        # rather than in _SCHEMA because _SCHEMA also runs against pre-existing
+        # databases, whose flows table may not have the column yet.
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(flows)")}
+        if "last_seen" in cols:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_flows_last_seen ON flows (last_seen)"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -313,7 +338,8 @@ class Store:
                 ),
             )
             self._append_event("new", host, obs, now, obs.snapshot_bytes, obs.snapshot_packets, 0.0)
-            self.conn.commit()
+            if not self._batching:
+                self.conn.commit()
             return
 
         prev_bytes = row["bytes"] or 0
@@ -381,7 +407,8 @@ class Store:
                 host, obs.proto, obs.direction, obs.local_ip, obs.peer_ip, obs.service_port,
             ),
         )
-        self.conn.commit()
+        if not self._batching:
+            self.conn.commit()
 
     def _append_event(
         self,
@@ -585,12 +612,28 @@ class Store:
         }
 
     def record_edges(self, host: str, edges: Iterable[EdgeObservation], now: Optional[float] = None) -> int:
+        """Record a whole poll's worth of edges in one transaction.
+
+        Committing per edge meant one fsync per tracked connection per poll.
+        On a host with a few thousand conntrack entries that dominated the
+        poll and blew the CPU/IO budget the collector promises to stay inside.
+        """
+
+        self._readonly_guard()
         if now is None:
             now = time.time()
         count = 0
-        for edge in edges:
-            self.record_edge(host, edge, now=now)
-            count += 1
+        self._batching = True
+        try:
+            for edge in edges:
+                self.record_edge(host, edge, now=now)
+                count += 1
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._batching = False
         return count
 
     # -- read / export ---------------------------------------------------
@@ -632,8 +675,19 @@ class Store:
             self.upsert_host(host_entry.get("host", "unknown"), host_entry.get("params", {}))
 
         flows = payload.get("flows", [])  # type: ignore[assignment]
+        if not isinstance(flows, list):
+            raise ValueError("snapshot 'flows' must be a list")
         count = 0
+        skipped = 0
         for f in flows:  # type: ignore[union-attr]
+            # CODE-015: a flow missing part of the edge key would insert a row
+            # keyed on NULLs, which is useless and collides with every other
+            # such row. Reject it rather than corrupt the table.
+            if not isinstance(f, dict) or any(
+                f.get(k) in (None, "") for k in _FLOW_KEY_COLUMNS
+            ):
+                skipped += 1
+                continue
             self.conn.execute(
                 """
                 INSERT INTO flows (
@@ -653,25 +707,36 @@ class Store:
                 )
                 ON CONFLICT (host, proto, direction, local_ip, peer_ip, service_port)
                 DO UPDATE SET
-                    peer_class=excluded.peer_class,
-                    peer_name=excluded.peer_name,
-                    bytes=excluded.bytes,
-                    packets=excluded.packets,
-                    last_snapshot_bytes=excluded.last_snapshot_bytes,
-                    first_seen=MIN(flows.first_seen, excluded.first_seen),
-                    last_seen=MAX(flows.last_seen, excluded.last_seen),
-                    last_active=MAX(flows.last_active, excluded.last_active),
-                    max_gap=MAX(flows.max_gap, excluded.max_gap),
-                    observations=excluded.observations,
-                    service_side=excluded.service_side,
-                    service_name=excluded.service_name,
-                    process_comm=excluded.process_comm,
-                    process_exe=excluded.process_exe,
-                    unit=excluded.unit,
-                    package=excluded.package,
-                    container_id=excluded.container_id,
-                    l7_protocol=excluded.l7_protocol,
-                    data_quality=excluded.data_quality,
+                    peer_class=COALESCE(excluded.peer_class, flows.peer_class),
+                    peer_name=COALESCE(excluded.peer_name, flows.peer_name),
+                    bytes=COALESCE(excluded.bytes, flows.bytes),
+                    packets=COALESCE(excluded.packets, flows.packets),
+                    last_snapshot_bytes=COALESCE(
+                        excluded.last_snapshot_bytes, flows.last_snapshot_bytes),
+                    last_snapshot_packets=COALESCE(
+                        excluded.last_snapshot_packets, flows.last_snapshot_packets),
+                    first_seen=COALESCE(
+                        MIN(flows.first_seen, excluded.first_seen),
+                        flows.first_seen, excluded.first_seen),
+                    last_seen=COALESCE(
+                        MAX(flows.last_seen, excluded.last_seen),
+                        flows.last_seen, excluded.last_seen),
+                    last_active=COALESCE(
+                        MAX(flows.last_active, excluded.last_active),
+                        flows.last_active, excluded.last_active),
+                    max_gap=COALESCE(
+                        MAX(flows.max_gap, excluded.max_gap),
+                        flows.max_gap, excluded.max_gap),
+                    observations=COALESCE(excluded.observations, flows.observations),
+                    service_side=COALESCE(excluded.service_side, flows.service_side),
+                    service_name=COALESCE(excluded.service_name, flows.service_name),
+                    process_comm=COALESCE(excluded.process_comm, flows.process_comm),
+                    process_exe=COALESCE(excluded.process_exe, flows.process_exe),
+                    unit=COALESCE(excluded.unit, flows.unit),
+                    package=COALESCE(excluded.package, flows.package),
+                    container_id=COALESCE(excluded.container_id, flows.container_id),
+                    l7_protocol=COALESCE(excluded.l7_protocol, flows.l7_protocol),
+                    data_quality=COALESCE(excluded.data_quality, flows.data_quality),
                     peer_domain=COALESCE(excluded.peer_domain, flows.peer_domain),
                     pod=COALESCE(excluded.pod, flows.pod),
                     netns=COALESCE(excluded.netns, flows.netns)
@@ -679,6 +744,11 @@ class Store:
                 _flow_row_defaults(f),
             )
             count += 1
+        if skipped:
+            log.warning(
+                "import: skipped %d flow row(s) missing part of the edge key "
+                "(host/proto/direction/local_ip/peer_ip/service_port)", skipped
+            )
         self.conn.commit()
         return count
 

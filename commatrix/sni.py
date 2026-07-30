@@ -19,7 +19,7 @@ import socket
 import struct
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger("commatrix.sni")

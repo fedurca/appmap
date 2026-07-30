@@ -19,7 +19,7 @@ import logging
 import socket
 import struct
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 log = logging.getLogger("commatrix.win.iphlp")
 

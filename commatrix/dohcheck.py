@@ -21,7 +21,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional
 
 # Chromium-family managed policy directories (system-wide, admin-enforced).

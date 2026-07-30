@@ -429,8 +429,8 @@ def _topology_html(rows: List[Dict[str, object]], mermaid: str) -> str:
     )
 
 
-def _mermaid_body(store: Store) -> str:
-    lines = topology_mermaid(store).strip().splitlines()
+def _mermaid_body(store: Store, host: Optional[str] = None) -> str:
+    lines = topology_mermaid(store, host).strip().splitlines()
     if lines and lines[0].startswith("```"):
         lines = lines[1:]
     if lines and lines[-1].startswith("```"):
@@ -442,7 +442,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
     rows = _rows(store, host)
     generated = fmt_time(time.time())
     host_filter = f" (host={host})" if host else ""
-    security = security_highlights(store)
+    security = security_highlights(store, host)
 
     service_items = _top_items(_sum_by(rows, "service_name"))
     peer_items = _top_items(_sum_by(rows, "peer_ip"))
@@ -551,7 +551,7 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
         if posture_parts else ""
     )
 
-    mermaid = _mermaid_body(store)
+    mermaid = _mermaid_body(store, host)
     topology = _topology_html(rows, mermaid)
 
     return f"""<!DOCTYPE html>
@@ -702,8 +702,8 @@ def _dot_label(text: object) -> str:
     return out.replace("\r", " ").replace("\n", "\\n")
 
 
-def topology_dot(store: Store) -> str:
-    rows = _rows(store)
+def topology_dot(store: Store, host: Optional[str] = None) -> str:
+    rows = _rows(store, host)
     ip_host = _ip_to_host(rows)
     edges = set()
     nodes = set()
@@ -728,8 +728,8 @@ def topology_dot(store: Store) -> str:
     return "\n".join(lines) + "\n"
 
 
-def topology_mermaid(store: Store) -> str:
-    rows = _rows(store)
+def topology_mermaid(store: Store, host: Optional[str] = None) -> str:
+    rows = _rows(store, host)
     ip_host = _ip_to_host(rows)
     edges = set()
     for r in rows:
@@ -759,10 +759,10 @@ def topology_mermaid(store: Store) -> str:
 
 
 # -- application catalog -------------------------------------------------
-def build_catalog(store: Store) -> Dict[str, object]:
+def build_catalog(store: Store, host: Optional[str] = None) -> Dict[str, object]:
     """Structured, machine-readable application catalog keyed by host."""
 
-    rows = _rows(store)
+    rows = _rows(store, host)
     ip_host = _ip_to_host(rows)
     hosts: Dict[str, Dict[str, object]] = {}
 
@@ -831,14 +831,14 @@ def build_catalog(store: Store) -> Dict[str, object]:
     }
 
 
-def catalog_json(store: Store) -> str:
-    return json.dumps(build_catalog(store), indent=2, sort_keys=True, default=str)
+def catalog_json(store: Store, host: Optional[str] = None) -> str:
+    return json.dumps(build_catalog(store, host), indent=2, sort_keys=True, default=str)
 
 
-def service_sheets(store: Store) -> str:
+def service_sheets(store: Store, host: Optional[str] = None) -> str:
     """Human-readable per-application documentation (Markdown)."""
 
-    catalog = build_catalog(store)
+    catalog = build_catalog(store, host)
     lines = ["# Application catalog", "", f"Generated: {catalog['generated_human']}", ""]
     for host_entry in sorted(catalog["hosts"], key=lambda h: str(h["host"])):  # type: ignore[index,arg-type]
         host = host_entry["host"]  # type: ignore[index]
@@ -895,8 +895,18 @@ def _dedupe_peers(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
 
 
 # -- security highlights -------------------------------------------------
-def security_highlights(store: Store) -> Dict[str, List[Dict[str, object]]]:
-    rows = _rows(store)
+def security_highlights(
+    store: Store, host: Optional[str] = None
+) -> Dict[str, List[Dict[str, object]]]:
+    """Security findings, optionally restricted to a single host.
+
+    CODE-018/019: this ignored the host filter entirely, so a per-host HTML
+    report and 'report -f security --host X' both disclosed findings -- peer
+    addresses, cleartext services, listening ports -- belonging to every other
+    host in the central database.
+    """
+
+    rows = _rows(store, host)
     external_inbound: List[Dict[str, object]] = []
     cleartext_external: List[Dict[str, object]] = []
     no_accounting: List[Dict[str, object]] = []
@@ -936,9 +946,10 @@ def security_highlights(store: Store) -> Dict[str, List[Dict[str, object]]]:
     }
 
 
-def security_markdown(store: Store) -> str:
-    data = security_highlights(store)
-    lines = ["# Security highlights", ""]
+def security_markdown(store: Store, host: Optional[str] = None) -> str:
+    data = security_highlights(store, host)
+    scope = f" (host={host})" if host else ""
+    lines = [f"# Security highlights{scope}", ""]
 
     def section(title: str, items: List[Dict[str, object]], desc: str) -> None:
         lines.append(f"## {title} ({len(items)})")

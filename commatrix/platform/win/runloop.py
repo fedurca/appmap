@@ -12,6 +12,8 @@ import logging
 import time
 from typing import Optional
 
+from ... import resources as rsrc
+
 log = logging.getLogger("commatrix.win.runloop")
 
 
@@ -60,6 +62,11 @@ def run(config, iterations: Optional[int] = None) -> None:
     try:
         while iterations is None or count < iterations:
             start = time.time()
+            # CODE-031: this passed a hardcoded 0.0 as "cpu used", so the
+            # software governor computed a zero-cost poll every time and never
+            # throttled. os.times() works on Windows, so measure it the same
+            # way the Linux loop does.
+            cpu_before = rsrc.process_cpu_seconds()
             paused = _enforce_disk(config, store, governor)
             if not paused:
                 edges = collector.build_edges([])  # dispatches to windows capture
@@ -76,7 +83,14 @@ def run(config, iterations: Optional[int] = None) -> None:
             count += 1
             if iterations is not None and count >= iterations:
                 break
-            time.sleep(governor.throttle_sleep(0.0, time.time() - start, config.poll_interval))
+            elapsed = time.time() - start
+            cpu_used = rsrc.process_cpu_seconds() - cpu_before
+            sleep_for = governor.throttle_sleep(cpu_used, elapsed, config.poll_interval)
+            log.debug(
+                "poll took %.3fs (cpu %.3fs); sleeping %.2fs",
+                elapsed, cpu_used, sleep_for,
+            )
+            time.sleep(sleep_for)
     except KeyboardInterrupt:
         log.info("collector interrupted; shutting down")
     finally:
