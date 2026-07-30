@@ -27,12 +27,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import urllib.request
 from typing import List, Optional
 
 from . import __version__
 from .config import load_config
+
+log = logging.getLogger("commatrix")
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -241,10 +244,13 @@ def cmd_push(args: argparse.Namespace) -> int:
 
     data = json.dumps(payload, default=str).encode("utf-8")
     url = args.server.rstrip("/") + "/ingest"
+    if not url.startswith(("http://", "https://")):
+        raise SystemExit(f"--server must be an http(s) URL (got: {args.server})")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    if args.token:
-        req.add_header("X-Commatrix-Token", args.token)
+    token = resolve_token(args)
+    if token:
+        req.add_header("X-Commatrix-Token", token)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")
@@ -255,12 +261,54 @@ def cmd_push(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_token(args: argparse.Namespace) -> Optional[str]:
+    """Resolve the shared token, preferring sources not visible in ps.
+
+    Precedence: --token-file, then COMMATRIX_TOKEN, then --token. A token on
+    argv is readable by every local user via ps/proc (SEC-020), so it is kept
+    only for backwards compatibility and warned about.
+    """
+
+    token_file = getattr(args, "token_file", None)
+    if token_file:
+        mode = os.stat(token_file).st_mode
+        if mode & 0o077:
+            raise SystemExit(
+                f"{token_file} is group- or world-readable; chmod 600 it first"
+            )
+        with open(token_file, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    env_token = os.environ.get("COMMATRIX_TOKEN")
+    if env_token:
+        return env_token.strip() or None
+    if getattr(args, "token", None):
+        log.warning(
+            "token passed on the command line is visible to other local users "
+            "in ps/proc; prefer --token-file or COMMATRIX_TOKEN"
+        )
+        return args.token
+    return None
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from .collector_server import serve
 
     config = load_config(args.config)
     db = args.database or config.database
-    serve(db, host=args.host, port=args.port, token=args.token)
+    token = resolve_token(args)
+    if not token:
+        raise SystemExit(
+            "refusing to start without a token: /ingest writes straight into "
+            "the central database, so an unauthenticated listener lets anyone "
+            "who can reach the port forge flow records.\n"
+            "Set one with --token-file <path> or COMMATRIX_TOKEN=<value>."
+        )
+    if args.host not in ("127.0.0.1", "::1", "localhost"):
+        log.warning(
+            "binding to %s exposes /ingest beyond this host; make sure the "
+            "port is firewalled to your collectors", args.host
+        )
+    serve(db, host=args.host, port=args.port, token=token)
     return 0
 
 
@@ -538,14 +586,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--host", help="restrict to a single host")
     p_push.add_argument("--server", required=True, help="central server base URL, e.g. http://host:8899")
     p_push.add_argument("--token", help="shared token (X-Commatrix-Token)")
+    p_push.add_argument(
+        "--token-file",
+        dest="token_file",
+        help="read the shared token from this file instead of the command line",
+    )
     p_push.set_defaults(func=cmd_push)
 
     p_serve = sub.add_parser("serve", help="run the central collector server")
     _add_common(p_serve)
     p_serve.add_argument("--database", help="central database path")
-    p_serve.add_argument("--host", default="0.0.0.0", help="bind address")
+    p_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (default 127.0.0.1; use 0.0.0.0 deliberately)",
+    )
     p_serve.add_argument("--port", type=int, default=8899, help="bind port")
-    p_serve.add_argument("--token", help="require this shared token")
+    p_serve.add_argument(
+        "--token",
+        help="shared token; prefer --token-file or COMMATRIX_TOKEN, since a "
+        "token on the command line is visible in ps and /proc",
+    )
+    p_serve.add_argument(
+        "--token-file",
+        dest="token_file",
+        help="read the shared token from this file (must not be world-readable)",
+    )
     p_serve.set_defaults(func=cmd_serve)
 
     p_agg = sub.add_parser("aggregate", help="merge snapshots/databases into a central DB")
