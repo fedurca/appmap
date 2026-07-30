@@ -205,7 +205,19 @@ class Store:
             os.makedirs(directory, mode=DB_DIR_MODE, exist_ok=True)
             created_dir = True
         db_existed = os.path.exists(path)
-        self.conn = sqlite3.connect(path)
+        # SEC-016: sqlite3.connect() creates the file under the process umask
+        # (0644 by default) and secure_permissions() only tightens it
+        # afterwards. Anything that opened it in that window keeps read access
+        # on the fd forever, so narrow the umask across creation instead of
+        # racing to fix it.
+        old_umask = None
+        if not db_existed and hasattr(os, "umask"):
+            old_umask = os.umask(0o137)
+        try:
+            self.conn = sqlite3.connect(path)
+        finally:
+            if old_umask is not None:
+                os.umask(old_umask)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA busy_timeout=5000;")

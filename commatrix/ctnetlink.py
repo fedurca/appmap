@@ -89,17 +89,24 @@ def parse_attrs(data: bytes) -> Dict[int, bytes]:
     return attrs
 
 
+_MAX_ACTIVE = 200000
+_MAX_DESTROYED = 50000
+
+
 def _decode_ip(ip_attrs: Dict[int, bytes], family: int) -> Tuple[str, str]:
     def dec(v4_key, v6_key):
         if family == socket.AF_INET and v4_key in ip_attrs:
             try:
                 return socket.inet_ntop(socket.AF_INET, ip_attrs[v4_key][:4])
-            except OSError:
+            except (OSError, ValueError):
+                # SEC-010: a truncated attribute makes inet_ntop raise
+                # ValueError, which is not an OSError -- it propagated out of
+                # run() and silently killed the listener thread.
                 return ""
         if family == socket.AF_INET6 and v6_key in ip_attrs:
             try:
                 return socket.inet_ntop(socket.AF_INET6, ip_attrs[v6_key][:16])
-            except OSError:
+            except (OSError, ValueError):
                 return ""
         return ""
     return dec(CTA_IP_V4_SRC, CTA_IP_V6_SRC), dec(CTA_IP_V4_DST, CTA_IP_V6_DST)
@@ -264,12 +271,22 @@ class ConntrackEventListener(threading.Thread):
                 self._active.pop(key, None)
                 self._destroyed.append(entry)
                 # Bound memory under a flood.
-                if len(self._destroyed) > 50000:
-                    self._destroyed = self._destroyed[-50000:]
+                if len(self._destroyed) > _MAX_DESTROYED:
+                    self._destroyed = self._destroyed[-_MAX_DESTROYED:]
             else:
                 self._active[key] = entry
-                if len(self._active) > 200000:
-                    self._active.clear()
+                if len(self._active) > _MAX_ACTIVE:
+                    # SEC-011: this used to clear() the whole table, which
+                    # discarded every currently tracked flow -- the collector
+                    # went blind to its own traffic right when it mattered.
+                    # Evict oldest-first instead (dicts keep insertion order).
+                    excess = len(self._active) - _MAX_ACTIVE
+                    for old_key in list(self._active)[:excess]:
+                        self._active.pop(old_key, None)
+                    log.warning(
+                        "conntrack table exceeded %d entries; evicted %d oldest",
+                        _MAX_ACTIVE, excess,
+                    )
 
     def run(self) -> None:
         try:

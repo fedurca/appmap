@@ -9,6 +9,7 @@ import logging
 import signal
 import socket as _socket
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -30,6 +31,9 @@ from .sockets import SocketEntry, build_inode_to_pid, listening_port_map, read_a
 from .store import EdgeObservation, Store
 from .zabbix import collect_host_params
 
+DNS_CACHE_MAX = 20000
+DNS_CACHE_TTL = 3600.0
+
 log = logging.getLogger("commatrix.collector")
 
 # key -> aggregated snapshot values while building one poll's result.
@@ -50,7 +54,10 @@ class Collector:
         self.classifier = NetworkClassifier(config.internal_cidrs)
         self.signatures: Signatures = load_signatures(config.signatures_dir)
         self.doh_signatures = dohdetect.load_doh_signatures(config.signatures_dir)
-        self._dns_cache: Dict[str, Optional[str]] = {}
+        # CODE-003: this was unbounded and never expired, so a long-running
+        # collector leaked memory on a busy host and kept serving stale PTR
+        # records indefinitely. Bounded LRU with a TTL instead.
+        self._dns_cache: "OrderedDict[str, Tuple[float, Optional[str]]]" = OrderedDict()
         self._accounting_warned = False
         self.capture_backend = ct.capture_backend(config.source)
         # Optional monitors used to annotate peers with the resolved domain.
@@ -94,8 +101,14 @@ class Collector:
         return None
 
     def _reverse_dns(self, ip: str) -> Optional[str]:
-        if ip in self._dns_cache:
-            return self._dns_cache[ip]
+        now = time.time()
+        cached = self._dns_cache.get(ip)
+        if cached is not None:
+            stamped, value = cached
+            if now - stamped < DNS_CACHE_TTL:
+                self._dns_cache.move_to_end(ip)
+                return value
+            del self._dns_cache[ip]
         name: Optional[str] = None
         old_timeout = _socket.getdefaulttimeout()
         try:
@@ -105,7 +118,10 @@ class Collector:
             name = None
         finally:
             _socket.setdefaulttimeout(old_timeout)
-        self._dns_cache[ip] = name
+        self._dns_cache[ip] = (now, name)
+        self._dns_cache.move_to_end(ip)
+        while len(self._dns_cache) > DNS_CACHE_MAX:
+            self._dns_cache.popitem(last=False)
         return name
 
     # -- one poll ------------------------------------------------------
@@ -553,6 +569,18 @@ def run_loop(config: Config, iterations: Optional[int] = None) -> None:
     except KeyboardInterrupt:
         log.info("collector interrupted; shutting down")
     finally:
+        # CODE-004: the handlers installed above turn SIGTERM/SIGHUP into
+        # KeyboardInterrupt. During shutdown that is exactly wrong -- a second
+        # signal (systemd sends one, then another if we are slow) raised
+        # straight through this block and left the nf_conntrack sysctls
+        # unrestored. Put them back to the default before cleaning up.
+        for _signame in ("SIGTERM", "SIGHUP"):
+            _sig = getattr(signal, _signame, None)
+            if _sig is not None:
+                try:
+                    signal.signal(_sig, signal.SIG_DFL)
+                except (OSError, ValueError):
+                    pass
         if event_listener is not None:
             event_listener.stop()
         if dns_monitor is not None:

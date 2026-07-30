@@ -41,9 +41,28 @@ def export_snapshot(db_path: str, out_path: str, host: str = None) -> str:  # ty
     return out_path
 
 
+MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+
+
 def import_snapshot_file(central: Store, path: str) -> int:
+    """Merge one snapshot file into the central DB.
+
+    SEC-019: json.load() was called on an arbitrary file with no size limit,
+    and the caller only caught OSError/JSONDecodeError -- so an oversized or
+    deeply nested snapshot (RecursionError is neither) aborted the whole
+    batch, not just that file.
+    """
+
+    size = os.path.getsize(path)
+    if size > MAX_SNAPSHOT_BYTES:
+        raise ValueError(
+            f"snapshot {path} is {size} bytes, over the "
+            f"{MAX_SNAPSHOT_BYTES} byte limit"
+        )
     with open(path, "r", encoding="utf-8") as fh:
         payload = json.load(fh)
+    if not isinstance(payload, dict):
+        raise ValueError(f"snapshot {path} is not a JSON object")
     return central.import_dict(payload)
 
 
@@ -58,8 +77,11 @@ def aggregate_snapshots(central_db: str, snapshot_paths: Iterable[str]) -> int:
                 merged = import_snapshot_file(central, path)
                 total += merged
                 log.info("merged %d flows from %s", merged, path)
-            except (OSError, json.JSONDecodeError) as exc:
-                log.error("failed to read snapshot %s: %s", path, exc)
+            except (OSError, ValueError, RecursionError) as exc:
+                # ValueError covers JSONDecodeError and our own size/shape
+                # checks; RecursionError is raised by json.load on deeply
+                # nested input and is not a ValueError subclass.
+                log.error("skipping snapshot %s: %s", path, exc)
     finally:
         central.close()
     return total
@@ -75,7 +97,10 @@ def aggregate_databases(central_db: str, db_paths: Iterable[str]) -> int:
             if os.path.abspath(path) == os.path.abspath(central_db):
                 continue
             try:
-                src = Store(path)
+                # CODE-020: opened read-write purely to call export_dict(),
+                # which ran migrations and chmod against a source database we
+                # only ever read, and can lock the file on Windows.
+                src = Store(path, read_only=True)
                 try:
                     payload = src.export_dict()
                 finally:
