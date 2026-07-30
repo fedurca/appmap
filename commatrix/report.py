@@ -13,6 +13,7 @@ Turns the aggregated flow database into:
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import io
 import ipaddress
@@ -83,13 +84,32 @@ def matrix_json(store: Store, host: Optional[str] = None) -> str:
     return json.dumps(rows, indent=2, sort_keys=True, default=str)
 
 
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: object) -> object:
+    """Neutralize spreadsheet formula injection in an exported cell.
+
+    Fields such as peer_name and process_comm are attacker-influenced; a value
+    like ``=cmd|'/C calc'!A0`` is executed by Excel/LibreOffice on open.  A
+    leading apostrophe makes the cell a literal string without losing the
+    original text.
+    """
+
+    if not isinstance(value, str) or not value:
+        return value
+    if value.startswith(CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
 def matrix_csv(store: Store, host: Optional[str] = None) -> str:
     rows = _rows(store, host)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=MATRIX_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for r in rows:
-        writer.writerow({k: r.get(k, "") for k in MATRIX_COLUMNS})
+        writer.writerow({k: csv_safe(r.get(k, "")) for k in MATRIX_COLUMNS})
     return buf.getvalue()
 
 
@@ -634,9 +654,52 @@ def _ip_to_host(rows: List[Dict[str, object]]) -> Dict[str, str]:
     return mapping
 
 
+MAX_NODE_ID_LEN = 48
+
+
 def _node_id(label: str) -> str:
+    """Derive a syntactically safe, bounded, collision-free diagram node ID.
+
+    Sanitizing alone is not enough: a peer_name is unbounded (reverse DNS and
+    /ingest both accept long strings), and a raw sanitized ID would put the
+    whole thing into every DOT/mermaid line.  Truncation alone would collide,
+    so long labels keep a short digest of the full original.
+    """
+
     safe = "".join(ch if ch.isalnum() else "_" for ch in label)
-    return "n_" + safe
+    if len(safe) <= MAX_NODE_ID_LEN:
+        return "n_" + safe
+    digest = hashlib.sha256(label.encode("utf-8", "replace")).hexdigest()[:12]
+    return "n_" + safe[:MAX_NODE_ID_LEN] + "_" + digest
+
+
+MAX_LABEL_LEN = 120
+
+
+def _mermaid_label(text: object) -> str:
+    """Escape a human-readable label for a mermaid ``["..."]`` node/edge.
+
+    Labels originate from peer_name (reverse DNS PTR), SNI ClientHello and the
+    /ingest endpoint, i.e. from data an attacker can influence.  The rendered
+    diagram is embedded verbatim inside ``<pre class="mermaid">`` in the HTML
+    dashboard, so an unescaped ``</pre><script>`` breaks out into script
+    context.  Mermaid renders HTML entities, so html.escape is both safe here
+    and faithful to the original text.
+    """
+
+    return html.escape(str(text)[:MAX_LABEL_LEN], quote=True)
+
+
+def _dot_label(text: object) -> str:
+    """Escape a label for a Graphviz ``label="..."`` attribute.
+
+    DOT is not HTML: only the backslash and the double quote are structural,
+    and a raw newline terminates the statement.
+    """
+
+    out = str(text)[:MAX_LABEL_LEN]
+    out = out.replace("\\", "\\\\").replace('"', '\\"')
+    return out.replace("\r", " ").replace("\n", "\\n")
 
 
 def topology_dot(store: Store) -> str:
@@ -658,9 +721,9 @@ def topology_dot(store: Store) -> str:
 
     lines = ["digraph commatrix {", "  rankdir=LR;", '  node [shape=box];']
     for n in sorted(nodes):
-        lines.append(f'  {_node_id(n)} [label="{n}"];')
+        lines.append(f'  {_node_id(n)} [label="{_dot_label(n)}"];')
     for src, dst, label in sorted(edges):
-        lines.append(f'  {_node_id(src)} -> {_node_id(dst)} [label="{label}"];')
+        lines.append(f'  {_node_id(src)} -> {_node_id(dst)} [label="{_dot_label(label)}"];')
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -688,9 +751,9 @@ def topology_mermaid(store: Store) -> str:
         return node_ids[name]
 
     for name in sorted({n for e in edges for n in (e[0], e[1])}):
-        lines.append(f'  {nid(name)}["{name}"]')
+        lines.append(f'  {nid(name)}["{_mermaid_label(name)}"]')
     for src, dst, label in sorted(edges):
-        lines.append(f'  {nid(src)} -->|"{label}"| {nid(dst)}')
+        lines.append(f'  {nid(src)} -->|"{_mermaid_label(label)}"| {nid(dst)}')
     lines.append("```")
     return "\n".join(lines) + "\n"
 
