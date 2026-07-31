@@ -7,6 +7,6 @@ aggregates data from many hosts into a communication matrix and application
 catalog.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 
 __all__ = ["__version__"]
