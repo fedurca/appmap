@@ -21,7 +21,7 @@ import json
 import math
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .store import Store
 
@@ -642,16 +642,80 @@ def report_html(store: Store, host: Optional[str] = None) -> str:
 
 
 # -- topology diagrams ---------------------------------------------------
-def _ip_to_host(rows: List[Dict[str, object]]) -> Dict[str, str]:
-    """Map known local IPs to their host so inter-VM edges can be linked."""
+def _is_host_local(ip: str) -> bool:
+    """True for addresses that only ever mean something on one machine.
 
-    mapping: Dict[str, str] = {}
+    Loopback and link-local addresses are identical on every host in a fleet,
+    so they can never be used to link two hosts together.
+    """
+
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_link_local
+
+
+def _ip_host_index(rows: List[Dict[str, object]]) -> Dict[str, Set[str]]:
+    """Map each observed local IP to the set of hosts that claim it."""
+
+    index: Dict[str, Set[str]] = {}
     for r in rows:
         if r.get("direction") in ("inbound", "loopback"):
-            ip = str(r.get("local_ip"))
+            ip = str(r.get("local_ip") or "")
             if ip:
-                mapping[ip] = str(r.get("host"))
-    return mapping
+                index.setdefault(ip, set()).add(str(r.get("host")))
+    return index
+
+
+def _ip_to_host(rows: List[Dict[str, object]]) -> Dict[str, str]:
+    """Map local IPs to their host, but only where the owner is unambiguous.
+
+    CODE-017: the old version was a plain last-write-wins dict, so in a fleet
+    where every machine has a docker bridge the row for 172.17.0.2 on host A
+    and the row for 172.17.0.2 on host B collapsed onto whichever host was
+    processed last -- and every container-local flow on every other host was
+    then drawn as an edge into that one machine. An IP claimed by more than one
+    host identifies nobody and is dropped from the mapping.
+    """
+
+    return {
+        ip: next(iter(hosts))
+        for ip, hosts in _ip_host_index(rows).items()
+        if len(hosts) == 1
+    }
+
+
+def _peer_node(r: Dict[str, object], index: Dict[str, Set[str]]) -> str:
+    """Resolve one row's peer to the node name it should be drawn as.
+
+    Merging a peer IP into a named *host* node is what draws an inter-host
+    edge, so it only happens when the address provably identifies exactly one
+    host. Anything else that is not globally unique is qualified with the
+    observing host, so two machines' 172.17.0.2 stay two nodes (CODE-017).
+    """
+
+    this_host = str(r.get("host"))
+    peer_ip = str(r.get("peer_ip") or "")
+    owners = index.get(peer_ip) or set()
+    host_local = _is_host_local(peer_ip)
+
+    if len(owners) == 1:
+        owner = next(iter(owners))
+        if owner == this_host or not host_local:
+            return owner
+
+    peer_name = r.get("peer_name")
+    label = str(peer_name) if peer_name else peer_ip
+
+    globally_unique = (
+        not host_local
+        and len(owners) <= 1
+        and (bool(peer_name) or r.get("peer_class") == "external")
+    )
+    if globally_unique:
+        return label
+    return f"{label} @ {this_host}"
 
 
 MAX_NODE_ID_LEN = 48
@@ -704,14 +768,13 @@ def _dot_label(text: object) -> str:
 
 def topology_dot(store: Store, host: Optional[str] = None) -> str:
     rows = _rows(store, host)
-    ip_host = _ip_to_host(rows)
+    ip_index = _ip_host_index(rows)
     edges = set()
     nodes = set()
     for r in rows:
         host = str(r.get("host"))
         nodes.add(host)
-        peer_ip = str(r.get("peer_ip"))
-        peer = ip_host.get(peer_ip) or (str(r.get("peer_name")) if r.get("peer_name") else peer_ip)
+        peer = _peer_node(r, ip_index)
         nodes.add(peer)
         label = f"{r.get('service_name') or r.get('service_port')}"
         if r.get("direction") == "outbound":
@@ -730,12 +793,11 @@ def topology_dot(store: Store, host: Optional[str] = None) -> str:
 
 def topology_mermaid(store: Store, host: Optional[str] = None) -> str:
     rows = _rows(store, host)
-    ip_host = _ip_to_host(rows)
+    ip_index = _ip_host_index(rows)
     edges = set()
     for r in rows:
         host = str(r.get("host"))
-        peer_ip = str(r.get("peer_ip"))
-        peer = ip_host.get(peer_ip) or (str(r.get("peer_name")) if r.get("peer_name") else peer_ip)
+        peer = _peer_node(r, ip_index)
         label = f"{r.get('service_name') or r.get('service_port')}"
         if r.get("direction") == "outbound":
             edges.add((host, peer, label))
@@ -763,7 +825,7 @@ def build_catalog(store: Store, host: Optional[str] = None) -> Dict[str, object]
     """Structured, machine-readable application catalog keyed by host."""
 
     rows = _rows(store, host)
-    ip_host = _ip_to_host(rows)
+    ip_index = _ip_host_index(rows)
     hosts: Dict[str, Dict[str, object]] = {}
 
     for host in store.list_hosts():
@@ -790,8 +852,7 @@ def build_catalog(store: Store, host: Optional[str] = None) -> Dict[str, object]
         host = str(r.get("host"))
         app = str(r.get("service_name") or f"port-{r.get('service_port')}")
         direction = r.get("direction")
-        peer_ip = str(r.get("peer_ip"))
-        peer = ip_host.get(peer_ip) or (str(r.get("peer_name")) if r.get("peer_name") else peer_ip)
+        peer = _peer_node(r, ip_index)
         l7 = r.get("l7_protocol")
 
         bucket = app_bucket(host, app)

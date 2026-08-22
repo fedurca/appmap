@@ -47,6 +47,10 @@ class WinConn:
     pid: int
     bytes_sent: int = 0
     bytes_recv: int = 0
+    # CODE-030: True only when byte counters for *this* connection really came
+    # back from TCP ESTATS. Without it a zero is indistinguishable from "we
+    # never asked", which is what made data_quality a per-host guess.
+    accounted: bool = False
 
     @property
     def is_listening(self) -> bool:
@@ -120,21 +124,55 @@ def parse_tcp_table_v6(buf: bytes) -> List[WinConn]:
     return rows
 
 
+ERROR_INSUFFICIENT_BUFFER = 122
+_TABLE_MAX_ATTEMPTS = 5
+_TABLE_HEADROOM = 4096
+
+
 def _get_extended_tcp_table(family: int) -> bytes:
+    """Fetch the extended TCP table, tolerating a table that grew underneath us.
+
+    SEC-026: the two-call sizing pattern is inherently racy -- between the call
+    that reports the required size and the call that fills the buffer, a busy
+    host opens more connections and the second call returns
+    ERROR_INSUFFICIENT_BUFFER. The old code turned that into an OSError and
+    dropped the entire address family for that poll, so the busier the host,
+    the more likely it silently captured nothing at all. Retry with the size
+    the API asks for, plus headroom.
+    """
+
     import ctypes
     from ctypes import wintypes
 
     iphlp = ctypes.windll.iphlpapi
+    # SEC-029: declare the signature so pointer arguments are not truncated.
+    iphlp.GetExtendedTcpTable.restype = wintypes.DWORD
+    iphlp.GetExtendedTcpTable.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+        wintypes.ULONG, ctypes.c_int, wintypes.ULONG,
+    ]
+
     size = wintypes.DWORD(0)
     # First call sizes the buffer.
     iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, family,
                               TCP_TABLE_OWNER_PID_ALL, 0)
-    buf = ctypes.create_string_buffer(size.value)
-    ret = iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, family,
-                                    TCP_TABLE_OWNER_PID_ALL, 0)
-    if ret != 0:
-        raise OSError(f"GetExtendedTcpTable failed: {ret}")
-    return buf.raw[:size.value]
+    last_ret = None
+    for attempt in range(_TABLE_MAX_ATTEMPTS):
+        alloc = size.value + _TABLE_HEADROOM
+        size = wintypes.DWORD(alloc)
+        buf = ctypes.create_string_buffer(alloc)
+        ret = iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, family,
+                                        TCP_TABLE_OWNER_PID_ALL, 0)
+        if ret == 0:
+            return buf.raw[:size.value]
+        last_ret = ret
+        if ret != ERROR_INSUFFICIENT_BUFFER:
+            break
+        log.debug(
+            "GetExtendedTcpTable: table grew (attempt %d), retrying with %d bytes",
+            attempt + 1, size.value,
+        )
+    raise OSError(f"GetExtendedTcpTable failed: {last_ret}")
 
 
 def get_tcp_connections() -> List[WinConn]:

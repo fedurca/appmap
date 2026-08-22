@@ -17,6 +17,20 @@ from ...store import EdgeObservation
 from . import iphlp, winprocess
 
 
+def _flow_is_accounted(
+    flow, accounted_keys: Set[Tuple[str, str, int, str, int]]
+) -> bool:
+    """True if the connection behind *flow* reported real byte counters."""
+
+    forward = (flow.proto, flow.local_ip, flow.local_port, flow.peer_ip, flow.peer_port)
+    if forward in accounted_keys:
+        return True
+    # Inbound flows fold onto the listening port, so the originating tuple has
+    # the service port on the local side.
+    inbound = (flow.proto, flow.local_ip, flow.service_port, flow.peer_ip, flow.peer_port)
+    return inbound in accounted_keys
+
+
 def build_edges(collector) -> List[EdgeObservation]:
     conns = iphlp.snapshot()
 
@@ -25,7 +39,11 @@ def build_edges(collector) -> List[EdgeObservation]:
     listen_pid: Dict[Tuple[str, int], int] = {}
     pid_map: Dict[Tuple[str, str, int, str, int], int] = {}
     entries: List[ConntrackEntry] = []
-    have_bytes = False
+    # CODE-030: per-connection accounting flag, keyed by the same 5-tuple used
+    # for pid attribution. data_quality used to be one global boolean, so a
+    # single ESTATS-capable TCP connection marked *every* edge on the host -
+    # UDP included - as byte-accurate.
+    accounted_keys: Set[Tuple[str, str, int, str, int]] = set()
 
     for c in conns:
         if c.local_ip and c.local_ip not in ("0.0.0.0", "::"):
@@ -36,8 +54,9 @@ def build_edges(collector) -> List[EdgeObservation]:
             continue
         if not c.remote_ip or c.remote_ip in ("0.0.0.0", "::") or c.remote_port == 0:
             continue
-        if c.bytes_sent or c.bytes_recv:
-            have_bytes = True
+        conn_key = (c.proto, c.local_ip, c.local_port, c.remote_ip, c.remote_port)
+        if getattr(c, "accounted", False) or c.bytes_sent or c.bytes_recv:
+            accounted_keys.add(conn_key)
         entries.append(ConntrackEntry(
             l4proto=c.proto, state=c.state,
             orig_src=c.local_ip, orig_dst=c.remote_ip,
@@ -47,7 +66,7 @@ def build_edges(collector) -> List[EdgeObservation]:
             reply_sport=c.remote_port, reply_dport=c.local_port,
             reply_bytes=c.bytes_recv, reply_packets=0,
         ))
-        pid_map[(c.proto, c.local_ip, c.local_port, c.remote_ip, c.remote_port)] = c.pid
+        pid_map[conn_key] = c.pid
 
     flows = normalize_entries(entries, local_ips, listening_ports, collector.classifier)
 
@@ -66,13 +85,18 @@ def build_edges(collector) -> List[EdgeObservation]:
             pids.add(pid)
         key = flow.key()
         agg = aggregated.get(key)
+        accounted = _flow_is_accounted(flow, accounted_keys)
         if agg is None:
-            aggregated[key] = {"flow": flow, "bytes": flow.bytes, "packets": flow.packets, "pid": pid}
+            aggregated[key] = {
+                "flow": flow, "bytes": flow.bytes, "packets": flow.packets,
+                "pid": pid, "accounted": accounted,
+            }
         else:
             agg["bytes"] += flow.bytes
             agg["packets"] += flow.packets
             if not agg["pid"] and pid:
                 agg["pid"] = pid
+            agg["accounted"] = bool(agg["accounted"]) or accounted
 
     processes = winprocess.collect_processes(list(pids))
 
@@ -93,7 +117,8 @@ def build_edges(collector) -> List[EdgeObservation]:
         if doh and flow.peer_class == "external":
             l7 = doh
 
-        data_quality = None if have_bytes else "socket-snapshot"
+        # CODE-030: quality is a property of this edge, not of the host.
+        data_quality = None if agg["accounted"] else "socket-snapshot"
 
         edges.append(EdgeObservation(
             proto=flow.proto, direction=flow.direction,
