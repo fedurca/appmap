@@ -24,6 +24,8 @@
           Pin it to a release tag or a full commit SHA, or set
           commatrix_allow_mutable_ref=true to accept a moving target.
         quiet: true
+      # noqa: run-once[task] - these plays use the default linear strategy;
+      # the guard is a one-time control-node check, not per-host work.
       run_once: true
       delegate_to: localhost
       become: false
@@ -50,7 +52,7 @@
       # reported a change on every run and idempotence was meaningless.
       # install.sh prints an explicit marker; anything else is a no-op run.
       changed_when: >-
-        commatrix_install.stdout is search('(?i)(installing|installed|updated|creating)')
+        commatrix_install.stdout | default('', true) is search('(?i)(installing|installed|updated|creating)')
 
     - name: Deploy managed configuration
       ansible.builtin.template:
@@ -59,7 +61,7 @@
         owner: root
         group: root
         mode: "0644"
-      notify: restart commatrix
+      notify: Restart commatrix
 
     # SEC-034: grant the capability set instead of running the whole collector
     # as root. Skipped when the operator explicitly chose the root fallback.
@@ -70,7 +72,7 @@
           --profile {{ commatrix_elevate_profile }}
       register: commatrix_elevate_run
       changed_when: >-
-        commatrix_elevate_run.stdout is search('(?i)(granted|created|added|wrote)')
+        commatrix_elevate_run.stdout | default('', true) is search('(?i)(granted|created|added|wrote)')
       when:
         - commatrix_elevate | bool
         - not (commatrix_run_as_root | bool)
@@ -90,7 +92,7 @@
         daemon_reload: true
 
   handlers:
-    - name: restart commatrix
+    - name: Restart commatrix
       ansible.builtin.systemd:
         name: commatrix-collector.service
         state: restarted

@@ -1,0 +1,16 @@
+---
+# Collections the playbooks in this directory need on the CONTROL node.
+#
+# ansible-core alone does not ship them, and without ansible.windows the
+# Windows plays fail at parse time rather than at run time -- which is how
+# ansible/collect.yml came to reference ansible.windows.win_fetch, a module
+# that does not exist and never has. Install with:
+#
+#     ansible-galaxy collection install -r ansible/requirements.yml
+#
+# (The full `ansible` PyPI package bundles both and is an alternative.)
+collections:
+  - name: ansible.windows
+    version: ">=2.0.0"
+  - name: community.general
+    version: ">=8.0.0"

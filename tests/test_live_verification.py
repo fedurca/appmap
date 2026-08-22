@@ -305,3 +305,114 @@ class PythonEmbedTrustTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TaskSchedulerXmlOrderTest(unittest.TestCase):
+    """SEC-023: Task Scheduler rejects XML whose elements are out of order.
+
+    The schema uses xsd:sequence, not xsd:all, so `schtasks /create /xml`
+    fails on a document that is otherwise perfectly valid but lists, say,
+    Enabled before StartWhenAvailable. Registration is the one step that
+    cannot be tried here, so the shape of what we would register is checked
+    against the documented sequences instead.
+
+    Sources:
+      learn.microsoft.com/.../taskschedulerschema-task-element
+      learn.microsoft.com/.../taskschedulerschema-settingstype-complextype
+      learn.microsoft.com/.../taskschedulerschema-principaltype-complextype
+    """
+
+    NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
+
+    TASK_ORDER = ["RegistrationInfo", "Triggers", "Principals", "Settings",
+                  "Data", "Actions"]
+    SETTINGS_ORDER = [
+        "AllowStartOnDemand", "RestartOnFailure", "MultipleInstancesPolicy",
+        "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries",
+        "AllowHardTerminate", "StartWhenAvailable", "NetworkProfileName",
+        "RunOnlyIfNetworkAvailable", "WakeToRun", "Enabled", "Hidden",
+        "DeleteExpiredTaskAfter", "IdleSettings", "NetworkSettings",
+        "ExecutionTimeLimit", "Priority", "RunOnlyIfIdle",
+        "UseUnifiedSchedulingEngine", "DisallowStartOnRemoteAppSession",
+        "MaintenanceSettings", "Volatile",
+    ]
+    PRINCIPAL_ORDER = ["UserId", "LogonType", "GroupId", "DisplayName",
+                       "RunLevel", "ProcessTokenSidType", "RequiredPrivileges"]
+    EXEC_ORDER = ["Command", "Arguments", "WorkingDirectory"]
+
+    def setUp(self):
+        from xml.etree import ElementTree
+
+        from commatrix.platform.win import elevate as ew
+
+        self.xml = ew._task_xml(
+            '"C:\\Python\\python.exe" -m commatrix collect --config "C:\\x.conf"'
+        )
+        self.root = ElementTree.fromstring(self.xml)
+
+    def _children(self, element):
+        return [c.tag.replace(self.NS, "") for c in element]
+
+    def _assert_ordered(self, actual, documented, where):
+        positions = []
+        for name in actual:
+            self.assertIn(name, documented, f"{where}: unknown element {name}")
+            positions.append(documented.index(name))
+        self.assertEqual(
+            positions, sorted(positions),
+            f"{where}: elements are out of schema order -> {actual}",
+        )
+
+    def test_it_is_well_formed_and_in_the_task_namespace(self):
+        self.assertTrue(self.root.tag.endswith("}Task"))
+        self.assertEqual(self.root.attrib.get("version"), "1.2")
+
+    def test_task_level_elements_are_in_order(self):
+        self._assert_ordered(self._children(self.root), self.TASK_ORDER, "Task")
+
+    def test_settings_elements_are_in_order(self):
+        settings = self.root.find(f"{self.NS}Settings")
+        self.assertIsNotNone(settings)
+        self._assert_ordered(
+            self._children(settings), self.SETTINGS_ORDER, "Settings"
+        )
+
+    def test_principal_elements_are_in_order(self):
+        principal = self.root.find(f"{self.NS}Principals/{self.NS}Principal")
+        self.assertIsNotNone(principal)
+        self._assert_ordered(
+            self._children(principal), self.PRINCIPAL_ORDER, "Principal"
+        )
+
+    def test_exec_elements_are_in_order(self):
+        exec_el = self.root.find(f"{self.NS}Actions/{self.NS}Exec")
+        self.assertIsNotNone(exec_el)
+        self._assert_ordered(self._children(exec_el), self.EXEC_ORDER, "Exec")
+
+    def test_the_principal_is_s4u_and_least_privilege(self):
+        principal = self.root.find(f"{self.NS}Principals/{self.NS}Principal")
+        self.assertEqual(principal.findtext(f"{self.NS}LogonType"), "S4U")
+        self.assertEqual(principal.findtext(f"{self.NS}RunLevel"), "LeastPrivilege")
+        self.assertEqual(principal.findtext(f"{self.NS}UserId"), "commatrix")
+
+    def test_actions_context_matches_the_principal_id(self):
+        principal = self.root.find(f"{self.NS}Principals/{self.NS}Principal")
+        actions = self.root.find(f"{self.NS}Actions")
+        self.assertEqual(actions.attrib.get("Context"), principal.attrib.get("id"))
+
+    def test_the_command_and_arguments_are_split_correctly(self):
+        exec_el = self.root.find(f"{self.NS}Actions/{self.NS}Exec")
+        self.assertEqual(exec_el.findtext(f"{self.NS}Command"),
+                         r"C:\Python\python.exe")
+        self.assertIn("-m commatrix collect",
+                      exec_el.findtext(f"{self.NS}Arguments"))
+
+    def test_special_characters_in_the_command_are_escaped(self):
+        from xml.etree import ElementTree
+
+        from commatrix.platform.win import elevate as ew
+
+        xml = ew._task_xml('"C:\\py.exe" -m commatrix --config "C:\\a&b<c>.conf"')
+        root = ElementTree.fromstring(xml)  # must not raise
+        args = root.find(f"{self.NS}Actions/{self.NS}Exec/{self.NS}Arguments")
+        self.assertIn("a&b<c>", args.text)

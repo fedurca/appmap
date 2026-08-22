@@ -65,6 +65,21 @@ The remaining "verify on a real host" items were run rather than reasoned about,
 - **`--profile topology` costs far more than "less attribution".** Measured on a 37-socket container: **92% of sockets attributed under `attribution` versus 8% under `topology`, and 0% of the sockets owned by another user.** Without `CAP_DAC_READ_SEARCH` the collector cannot read `/proc/<pid>/fd` for other users' processes at all, so it is a topology-only profile in practice. That number is now in the `--profile` help and in the warning `elevate-linux` prints, and `packaging/measure_attribution.py` measures it on any host under any profile.
 - **`--revoke`'s new unit-User check does not cry wolf**: it stays silent when the user matches, distinguishes "could not read" from "drifted", and is skipped when there was no daemon-reload.
 
+### Verification, round three: the deployment glue
+
+The Ansible playbooks had never been run through Ansible — they are deployment glue, not Python, so the test suite never reached them. Doing it found a bug older than the review:
+
+- **`ansible/collect.yml` referenced `ansible.windows.win_fetch`, a module that does not exist and never has.** The Windows snapshot play could not be parsed, let alone collect anything, and it was already broken at `344112e`. Fixed to `ansible.builtin.fetch`, which is what the Linux play four lines above already used.
+- Nothing declared which collections a control node needs, which is exactly why nobody noticed: without `ansible.windows` installed the play fails the same way whether the module exists or not. Added `ansible/requirements.yml`.
+- `ansible-lint` now passes at the **production** profile, and the SEC-035 mutable-ref guard is executed both ways in CI — silent for a pinned version, failing the run with its intended message for `main`, and honouring the escape hatch.
+- The `changed_when` expressions now tolerate a missing `stdout`, so a skipped task cannot turn CODE-034's fix into a new undefined-attribute error.
+
+Also closed as far as this environment allows:
+
+- **Dockerfile**: parses, BuildKit accepts the digest-pinned `FROM`, and `docker buildx build --check` reports no warnings. The actual build and `imagetools inspect` still need registry access.
+- **The S4U task XML** is validated against Microsoft's documented schema sequences for `Task`, `Settings`, `Principal` and `Exec`. Task Scheduler uses `xsd:sequence`, not `xsd:all`, so otherwise-valid XML in the wrong order is rejected at registration — the one step that cannot be tried without a Windows host.
+- **The sigstore invocation**: `--bundle`, `--cert-identity` and `--cert-oidc-issuer` all exist, with those exact spellings, in sigstore 4.5.0.
+
 ### Notes on the review itself
 
 - **SEC-028** could not be fixed the way it is usually written. The standard approach — hooking expat through `XMLParser.parser` — does nothing on Python 3.9+, because `xml.etree` no longer exposes that attribute; code written that way passes its own tests while providing no protection. Replaced with a pre-parse rejection of DOCTYPE/ENTITY/NOTATION markup.

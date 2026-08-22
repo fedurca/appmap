@@ -4,12 +4,17 @@ COMMATRIX — ZBÝVAJÍCÍ PRÁCE PO BEZPEČNOSTNÍ REVIZI
 Revize:     commatrix-review.pdf, 2026-07-22
 Revidováno: 344112e2ad063f546e61ada01a62f1c133f48d91
 Větev oprav: fix/review-medium (navazuje na tag 1.1.0)
-Stav testů: 439 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
+Stav testů: 459 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
 Pokrytí:    ~72 % řádků balíčku commatrix
 
 Nálezů celkem 81: 5 Critical, 6 High, 38 Medium, 30 Low, 2 Info.
-VŠECHNY UZAVŘENÉ. Supply-chain piny jsou doplněné a vynucené.
-Zbývá jen to, co fyzicky potřebuje Windows nebo Docker daemon.
+VŠECHNY UZAVŘENÉ. Supply-chain piny doplněné a vynucené.
+Nad rámec revize opraveny 4 chyby, které našlo až samotné ověřování
+(viz CHANGELOG) — poslední z nich, neexistující modul
+ansible.windows.win_fetch, byla v repu už před revizí.
+
+Zbývá jen to, co fyzicky potřebuje Windows stroj nebo přístup do
+container registry.
 
 
 SUPPLY CHAIN — HOTOVO
@@ -83,30 +88,56 @@ Co ta měření našla (detaily v CHANGELOG.md):
 OVĚŘENÍ — CO OPRAVDU ZBÝVÁ
 ==========================
 
-Jen věci, které fyzicky potřebují Windows nebo Docker daemon.
+Ansible: HOTOVO, a našlo to chybu starší než revize
+---------------------------------------------------
+[x] deploy.yml/collect.yml/report.yml/pull_and_report.yml/deploy_windows.yml
+    procházejí `ansible-playbook --syntax-check`
+[x] ansible-lint prochází na profilu "production" (nejpřísnějším)
+[x] SEC-035 guard doopravdy spuštěn: s 1.1.0 mlčí, s "main" shodí běh
+    s tou správnou hláškou, escape hatch funguje
+[x] SEC-034/036 výchozí hodnoty ověřeny přímo z group_vars
 
-Windows:
+    NALEZENO: ansible/collect.yml volal `ansible.windows.win_fetch`.
+    Takový modul v kolekci NENÍ a nikdy nebyl — Windows část sběru
+    snapshotů se ani nedala naparsovat, natož spustit. Chyba je
+    přítomná už v 511961e, revize ji nezachytila (playbooky nikdo
+    nikdy nepustil přes Ansible). Opraveno na ansible.builtin.fetch,
+    což je i to, co používá linuxová část o pár řádků výš.
+
+    Přibylo ansible/requirements.yml — repo nikde nedeklarovalo, které
+    kolekce control node potřebuje, což je přesně důvod, proč si té
+    chyby nikdo nevšiml.
+
+    Hlídá CI job "ansible".
+
+Docker: ověřeno, co bez registry jde
+-------------------------------------
+[x] Dockerfile se naparsuje a BuildKit akceptuje digest-pinnutý FROM
+[x] `docker buildx build --check` prochází bez jediného varování
+    (spuštěno s dočasně nahrazeným FROM, protože proxy blokuje
+    registry-1.docker.io)
+[ ] skutečný build + `docker buildx imagetools inspect` (SBOM,
+    provenance) — potřebuje přístup do registry
+
+Windows: ověřeno vše kromě skutečného stroje
+---------------------------------------------
+[x] S4U task XML: struktura ověřena proti dokumentovanému schématu
+    Microsoftu — pořadí elementů v Task, Settings, Principal i Exec.
+    Task Scheduler používá xsd:sequence, ne xsd:all, takže jinak
+    naprosto validní XML se špatným pořadím registraci shodí.
+    Ověřen i escaping a to, že Actions Context odpovídá Principal id.
+[x] sigstore CLI: flagy --bundle / --cert-identity / --cert-oidc-issuer
+    v sigstore 4.5.0 existují přesně v té podobě, jak je build volá
 [ ] elevate-windows bez --allow-sedebug — funguje atribuce?
-[ ] elevate-windows: registrace úlohy přes S4U XML (SEC-023).
-    Ověřit, že úloha po restartu naběhne pod účtem 'commatrix' bez
-    uloženého hesla. Fallback na /rp se hlásí warningem — pokud ho
+[ ] elevate-windows: úloha po restartu naběhne pod 'commatrix' bez
+    uloženého hesla? Fallback na /rp se hlásí warningem — když ho
     uvidíš, S4U selhalo.
 [ ] elevate-windows: po rebindu musí být DB zapisovatelná pro servisní
-    účet (SEC-025). Dříve to končilo Access Denied.
-[ ] MSI build: Sigstore ověření embedded Pythonu (SEC-033) — projde
-    `python -m sigstore verify identity` na windows-latest runneru?
-[ ] opravený CPU governor (CODE-031) — os.times() na Windows
-[ ] WinDnsMonitor: bookmark podle EventRecordID (CODE-027)
-
-Docker:
-[ ] build s digest pinem projde a 'docker buildx imagetools inspect'
-    ukáže SBOM i provenance
-
-Ansible (SEC-034/035/036 mění výchozí chování):
-[ ] deploy.yml nyní NEBĚŽÍ jako root — ověřit, že
-    elevate-linux --profile attribution dá kolektoru dost práv
-[ ] deploy_windows.yml nyní volá elevate-windows
-[ ] deploy.yml odmítne commatrix_version: "main" — je to záměr
+    účet (SEC-025)
+[ ] MSI build: projde `python -m sigstore verify identity` proti
+    skutečnému .sigstore bundlu na windows-latest runneru?
+[ ] CPU governor (CODE-031): os.times() na skutečných Windows
+[ ] WinDnsMonitor bookmark (CODE-027) proti skutečnému event logu
 
 
 CO SE UDĚLALO (na větvi fix/review-medium)
@@ -126,6 +157,8 @@ CO SE UDĚLALO (na větvi fix/review-medium)
   Ověření offline       visudo, systemd-analyze, Docker UID 65532;
                         opraveno: topology profil, WAL read-only
   Piny + doověření      SEC-033 040 044 doplněny; CODE-006 dodělána
+  Ansible ověřen        win_fetch (neexistující modul) opraven,
+                        requirements.yml, syntax-check + lint v CI
 
 Metodika: každý regresní test byl ověřen dočasným revertem opravy.
 Test, který projde i na rozbitém kódu, nehlídá nic. Výjimky, kde

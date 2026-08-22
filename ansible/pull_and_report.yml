@@ -3,5 +3,8 @@
 # node in one run.
 #
 #   ansible-playbook -i inventory.ini pull_and_report.yml
-- ansible.builtin.import_playbook: collect.yml
-- ansible.builtin.import_playbook: report.yml
+- name: Pull snapshots from every host
+  ansible.builtin.import_playbook: collect.yml
+
+- name: Merge snapshots and render the report on the control node
+  ansible.builtin.import_playbook: report.yml

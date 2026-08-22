@@ -35,13 +35,13 @@
       register: commatrix_pip
       # CODE-034: pip reports what it did; only "Successfully installed"
       # (or an actual build) is a change.
-      changed_when: commatrix_pip.stdout is search('Successfully installed')
+      changed_when: commatrix_pip.stdout | default('', true) is search('Successfully installed')
 
     - name: Install and start the SYSTEM startup task + secure data dir
       ansible.windows.win_command: python -m commatrix install-windows
       register: commatrix_install_windows
       changed_when: >-
-        commatrix_install_windows.stdout is search('(?i)(created|installed|registered)')
+        commatrix_install_windows.stdout | default('', true) is search('(?i)(created|installed|registered)')
 
     # SEC-036: the Windows deploy installed a task running as SYSTEM and then
     # stopped, so every managed Windows host stayed permanently at the highest
@@ -54,7 +54,7 @@
         {{ '--allow-sedebug' if commatrix_windows_allow_sedebug | bool else '' }}
       register: commatrix_elevate_windows
       changed_when: >-
-        commatrix_elevate_windows.stdout is search('(?i)(created|rotated|now runs as|granted)')
+        commatrix_elevate_windows.stdout | default('', true) is search('(?i)(created|rotated|now runs as|granted)')
       when: commatrix_windows_elevate | bool
 
     - name: Warn that the Windows collector still runs as SYSTEM

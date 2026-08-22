@@ -35,7 +35,7 @@
         mode: "0750"
       delegate_to: localhost
       become: false
-      run_once: true
+      run_once: true  # noqa: run-once[task] - default linear strategy
 
     - name: Fetch snapshot to the control node
       ansible.builtin.fetch:
@@ -75,10 +75,15 @@
         mode: "0750"
       delegate_to: localhost
       become: false
-      run_once: true
+      run_once: true  # noqa: run-once[task] - default linear strategy
 
+    # There is no ansible.windows.win_fetch module and there never has been --
+    # this play could not run at all, so Windows snapshots were never collected.
+    # ansible.builtin.fetch is the right module for pulling a file off a
+    # Windows target (it goes through the collection's slurp action), and it is
+    # what the Linux play above already uses.
     - name: Fetch Windows snapshot to the control node
-      ansible.windows.win_fetch:
+      ansible.builtin.fetch:
         src: "{{ remote_snapshot }}"
         dest: "{{ commatrix_local_dir }}/snapshots/{{ inventory_hostname }}.json"
         flat: true
