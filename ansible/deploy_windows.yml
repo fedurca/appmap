@@ -25,10 +25,41 @@
         src: "{{ playbook_dir }}/../"
         dest: "{{ commatrix_src_dir }}\\"
 
+    # SEC-037: win_command, not win_shell. win_shell hands the string to
+    # PowerShell, so anything interpolated into it (a path from inventory, a
+    # host variable) is executable there. Nothing here needs a shell.
     - name: Install the commatrix package (pip places code; no runtime deps)
-      ansible.windows.win_shell: python -m pip install .
+      ansible.windows.win_command: python -m pip install .
       args:
         chdir: "{{ commatrix_src_dir }}"
+      register: commatrix_pip
+      # CODE-034: pip reports what it did; only "Successfully installed"
+      # (or an actual build) is a change.
+      changed_when: commatrix_pip.stdout is search('Successfully installed')
 
     - name: Install and start the SYSTEM startup task + secure data dir
       ansible.windows.win_command: python -m commatrix install-windows
+      register: commatrix_install_windows
+      changed_when: >-
+        commatrix_install_windows.stdout is search('(?i)(created|installed|registered)')
+
+    # SEC-036: the Windows deploy installed a task running as SYSTEM and then
+    # stopped, so every managed Windows host stayed permanently at the highest
+    # privilege the tool can hold -- while the Linux deploy dropped to a
+    # capability set. elevate-windows is the whole point of that asymmetry
+    # being fixable; run it.
+    - name: Drop the collector task to the least-privilege service account
+      ansible.windows.win_command: >-
+        python -m commatrix elevate-windows
+        {{ '--allow-sedebug' if commatrix_windows_allow_sedebug | bool else '' }}
+      register: commatrix_elevate_windows
+      changed_when: >-
+        commatrix_elevate_windows.stdout is search('(?i)(created|rotated|now runs as|granted)')
+      when: commatrix_windows_elevate | bool
+
+    - name: Warn that the Windows collector still runs as SYSTEM
+      ansible.builtin.debug:
+        msg: >-
+          commatrix_windows_elevate is false: the scheduled task keeps running
+          as SYSTEM instead of the dedicated least-privilege account (SEC-036).
+      when: not (commatrix_windows_elevate | bool)

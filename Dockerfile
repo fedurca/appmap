@@ -17,11 +17,16 @@
 # the exact opposite of the least-privilege model the elevate-linux and
 # elevate-windows paths are built around. --cap-add of the three capabilities
 # above is strictly more restrictive and is all the collector needs.
-# TODO(SEC-044): pin this to a digest. Left as a tag deliberately -- a
-# placeholder digest would break the build, and the correct value has to come
-# from the registry:
-#   docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}'
-# then use  FROM python:3.12-slim@sha256:<digest>  and refresh it via Dependabot.
+# SEC-044: this base image must be pinned to a digest. A tag is mutable -- the
+# same Dockerfile builds different software on different days, and there is
+# nothing to roll back to. The pin is not hardcoded here by hand because a
+# wrong digest breaks every build; resolve and write it with
+#
+#   python packaging/pin_supply_chain.py --write
+#
+# which rewrites this FROM to  python:3.12-slim@sha256:<digest>, and is
+# enforced by the supply-chain-pins job in CI. Dependabot (docker ecosystem)
+# keeps the digest current afterwards.
 FROM python:3.12-slim
 
 ARG VERSION=0.0.0

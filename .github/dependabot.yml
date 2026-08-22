@@ -1,0 +1,23 @@
+# Keeps the supply-chain pins current (SEC-040, SEC-044).
+#
+# The pins themselves are created by `python packaging/pin_supply_chain.py
+# --write`; Dependabot is what stops them from silently rotting into
+# "pinned to a two-year-old vulnerable version", which is the usual way
+# SHA-pinning turns from a control into a liability.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "build"

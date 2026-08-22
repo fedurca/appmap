@@ -52,7 +52,9 @@ specific image digest.
 | appimagetool / python-appimage | MIT | AppImage |
 | snapcraft | GPL-3.0 | Snap |
 | flatpak-builder | LGPL-2.1 | Flatpak |
-| Syft (anchore/sbom-action) | Apache-2.0 | machine SBOM |
+| Syft (anchore/sbom-action) | Apache-2.0 | machine SBOM (source tree) |
+| BuildKit SBOM/provenance generators | Apache-2.0 | image SBOM + SLSA provenance attestation |
+| cosign (sigstore) | Apache-2.0 | keyless signatures over the image and `SHA256SUMS` |
 
 ## License obligations
 
@@ -69,12 +71,57 @@ CI generates CycloneDX JSON (and SPDX) with Syft:
 - per commit in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (uploaded
   as the `sbom` artifact);
 - per release in [`.github/workflows/release.yml`](.github/workflows/release.yml),
-  attached to the GitHub Release, including an image SBOM for the published
-  Docker digest.
+  attached to the GitHub Release.
 
-To generate locally:
+Two different SBOMs exist and they cover different things:
+
+| SBOM | Produced by | Covers | Where it lives |
+|---|---|---|---|
+| Source SBOM (`commatrix-<version>.cdx.json`) | Syft, over the checked-out tree | this repository's own contents | attached to the GitHub Release |
+| Image SBOM | BuildKit (`sbom: true` on the build) | the published container image, base layers included | an attestation on the image in ghcr.io, read with `cosign`/`docker buildx imagetools` |
+
+SEC-045: this section previously claimed the release workflow attached an image
+SBOM to the GitHub Release. It did not, and could not -- the Docker build
+explicitly passed `sbom: false` and `provenance: false`, so no image SBOM was
+produced anywhere. An SBOM that is documented but absent is worse than one that
+is simply missing: it is the document an auditor relies on. The image SBOM and
+SLSA provenance are now generated as attestations on the image itself, which is
+where a digest-addressed SBOM belongs.
+
+To generate or read them locally:
 
 ```bash
+# Source tree
 syft dir:. -o cyclonedx-json=commatrix.cdx.json
+
+# Published image: read the attestations BuildKit attached at build time
+docker buildx imagetools inspect ghcr.io/fedurca/commatrix:latest \
+  --format '{{ json .SBOM }}'
+docker buildx imagetools inspect ghcr.io/fedurca/commatrix:latest \
+  --format '{{ json .Provenance }}'
+
+# Or scan the image yourself
 syft ghcr.io/fedurca/commatrix:latest -o spdx-json=commatrix-image.spdx.json
 ```
+
+## Verifying a release
+
+```bash
+sha256sum -c SHA256SUMS
+
+cosign verify-blob SHA256SUMS \
+  --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
+  --certificate-identity-regexp '^https://github.com/fedurca/appmap/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+cosign verify ghcr.io/fedurca/commatrix:<version> \
+  --certificate-identity-regexp '^https://github.com/fedurca/appmap/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+## Supply-chain pins
+
+`python packaging/pin_supply_chain.py --check` (run in CI) fails while any
+GitHub Action, the container base image, or the embedded Windows CPython is
+referenced by a mutable name. `--write` resolves each of them upstream and
+records the immutable identifier; Dependabot keeps them current.

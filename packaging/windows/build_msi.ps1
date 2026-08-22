@@ -10,7 +10,9 @@ param(
     [string]$Version = "0.0.0",
     [string]$PythonVersion = "3.12.7",
     # Pin WiX 5.x — WiX 7+ requires accepting the OSMF EULA in interactive installs.
-    [string]$WixVersion = "5.0.2"
+    [string]$WixVersion = "5.0.2",
+    # SEC-033 escape hatch. Only for a local experiment; never in CI.
+    [switch]$AllowUnverifiedPython
 )
 $ErrorActionPreference = "Stop"
 $Here = $PSScriptRoot
@@ -25,10 +27,46 @@ python (Join-Path $Here "build_package.py") --out (Join-Path $Out "commatrix-win
 if ($LASTEXITCODE -ne 0) { throw "build_package.py failed with exit $LASTEXITCODE" }
 
 # 2) Add the Windows embeddable Python into payload\python.
+#
+# SEC-033: this interpreter is shipped inside the MSI and runs as the
+# collector, so whatever bytes land here are executed on every managed Windows
+# host. Downloading them over TLS proves who served them, not what they are:
+# a compromised mirror, a cached proxy or a redirected CI runner all produce a
+# perfectly valid TLS session around the wrong file. The expected SHA256 lives
+# in the repository and is compared before anything is unpacked.
 $zip = "python-$PythonVersion-embed-amd64.zip"
 $url = "https://www.python.org/ftp/python/$PythonVersion/$zip"
 $tmp = Join-Path $env:TEMP $zip
 Invoke-WebRequest -Uri $url -OutFile $tmp
+
+$manifest = Join-Path $Here "python-embed-sha256.txt"
+$expected = $null
+if (Test-Path $manifest) {
+    foreach ($line in Get-Content $manifest) {
+        $t = $line.Trim()
+        if ($t -eq "" -or $t.StartsWith("#")) { continue }
+        $parts = $t -split "\s+"
+        if ($parts.Length -eq 2 -and $parts[1] -eq $zip) { $expected = $parts[0].ToLower() }
+    }
+}
+
+$actual = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLower()
+if ($null -eq $expected) {
+    $msg = "No SHA256 recorded for $zip in $manifest (SEC-033). " +
+           "Run: python packaging/pin_supply_chain.py --write"
+    if ($AllowUnverifiedPython) {
+        Write-Warning $msg
+    } else {
+        Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+        throw $msg
+    }
+} elseif ($actual -ne $expected) {
+    Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    throw "SHA256 mismatch for ${zip}: expected $expected, got $actual (SEC-033)"
+} else {
+    Write-Host "Verified $zip against the recorded SHA256."
+}
+
 $pyDir = Join-Path $Payload "python"
 if (Test-Path $pyDir) { Remove-Item -Recurse -Force $pyDir }
 Expand-Archive -Path $tmp -DestinationPath $pyDir -Force

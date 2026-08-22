@@ -17,7 +17,15 @@
   tasks:
     - name: Export a JSON snapshot on the host
       ansible.builtin.command:
-        cmd: "/usr/bin/commatrix export -o {{ remote_snapshot }}"
+        # argv form: the snapshot path is inventory-derived and must never be
+        # concatenated into a shell string (SEC-037).
+        argv:
+          - /usr/bin/commatrix
+          - export
+          - -o
+          - "{{ remote_snapshot }}"
+      # Writing a snapshot does change state on the host, but it is the whole
+      # point of the task rather than a drift signal; keep it explicit.
       changed_when: true
 
     - name: Ensure local snapshot directory exists
@@ -46,9 +54,19 @@
     remote_snapshot: 'C:\ProgramData\commatrix\snapshots\{{ inventory_hostname }}.json'
 
   tasks:
+    # SEC-037: win_shell runs the interpolated string through PowerShell, so a
+    # host name containing a quote or a semicolon becomes command execution on
+    # the target. win_command with an argv list does not go near a shell.
     - name: Export a JSON snapshot on the Windows host
-      ansible.windows.win_shell: >-
-        python -m commatrix export -o "{{ remote_snapshot }}"
+      ansible.windows.win_command:
+        argv:
+          - python
+          - -m
+          - commatrix
+          - export
+          - -o
+          - "{{ remote_snapshot }}"
+      changed_when: true
 
     - name: Ensure local snapshot directory exists
       ansible.builtin.file:
@@ -56,6 +74,7 @@
         state: directory
         mode: "0750"
       delegate_to: localhost
+      become: false
       run_once: true
 
     - name: Fetch Windows snapshot to the control node

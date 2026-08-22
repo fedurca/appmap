@@ -1,0 +1,11 @@
+# SHA256 of the Windows embeddable Python archives the MSI build embeds
+# (SEC-033). The build refuses to unpack an archive that is not listed here.
+#
+# Format: <sha256>  <filename>
+#
+# Regenerate (needs network access to python.org):
+#   python packaging/pin_supply_chain.py --write
+#
+# Cross-check the value against the "Windows embeddable package (64-bit)"
+# entry on https://www.python.org/downloads/release/python-<version>/ before
+# committing it.

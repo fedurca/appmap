@@ -72,3 +72,19 @@ jobs:
         with:
           name: sbom
           path: commatrix.cdx.json
+
+  supply-chain-pins:
+    # SEC-033/040/044: fails while any GitHub Action, the container base image
+    # or the embedded Windows Python is referenced by a mutable name. The
+    # resolver that produces the pins needs network access to api.github.com,
+    # the registry and python.org, so it is run once by a human:
+    #     python packaging/pin_supply_chain.py --write
+    # This job only checks the result, offline.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check supply-chain pins
+        run: python packaging/pin_supply_chain.py --check

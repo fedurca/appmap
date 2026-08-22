@@ -64,6 +64,14 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     continue-on-error: true
+    # SEC-042: id-token is what lets buildx attach SLSA provenance and lets
+    # cosign sign keylessly against Sigstore; attestations:write publishes the
+    # provenance attestation alongside the image.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,16 +85,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          provenance: false
-          sbom: false
+          # SEC-042: the image shipped with provenance and SBOM explicitly
+          # switched off, so nothing downstream could establish what was in it
+          # or which commit and workflow produced it. mode=max records the
+          # full build definition and materials.
+          provenance: mode=max
+          sbom: true
           build-args: VERSION=${{ needs.version.outputs.version }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/commatrix:${{ needs.version.outputs.version }}
             ghcr.io/${{ github.repository_owner }}/commatrix:latest
+
+      # SEC-041/042: a keyless (OIDC) signature over the image digest, so a
+      # consumer can verify the image came from this repository's release
+      # workflow and not from anyone who can push to the registry.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the container image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/commatrix
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Verification instructions
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/commatrix
+        run: |
+          echo "Verify with:"
+          echo "  cosign verify ${IMAGE}@${DIGEST} \\"
+          echo "    --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \\"
+          echo "    --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+          echo "  cosign verify-attestation --type slsaprovenance ${IMAGE}@${DIGEST} \\"
+          echo "    --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \\"
+          echo "    --certificate-oidc-issuer https://token.actions.githubusercontent.com"
 
   appimage:
     needs: version
@@ -178,6 +216,12 @@ jobs:
     needs: [version, sdist-wheel, docker, appimage, msi, snap, flatpak, sbom]
     if: ${{ always() && needs.version.result == 'success' && needs.sdist-wheel.result == 'success' }}
     runs-on: ubuntu-latest
+    # SEC-041: id-token for keyless signing, attestations for the build
+    # provenance of the release artifacts.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download package artifacts
         uses: actions/download-artifact@v4
@@ -203,6 +247,52 @@ jobs:
             exit 1
           fi
           cd release && sha256sum * > SHA256SUMS
+
+      # SEC-041: checksums establish integrity against accidental corruption,
+      # not authenticity -- anyone who can edit the release can replace both
+      # the artifact and its line in SHA256SUMS. A keyless Sigstore signature
+      # over SHA256SUMS binds the whole set to this workflow, on this
+      # repository, at this commit.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the checksum manifest
+        working-directory: release
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+          cat > SHA256SUMS.verify.md <<'VERIFY'
+          # Verifying this release
+
+          1. Check the artifact hashes:
+
+                 sha256sum -c SHA256SUMS
+
+          2. Check that SHA256SUMS itself came from this repository's release
+             workflow (needs https://github.com/sigstore/cosign):
+
+                 cosign verify-blob SHA256SUMS \
+                   --signature SHA256SUMS.sig \
+                   --certificate SHA256SUMS.pem \
+                   --certificate-identity-regexp '^https://github.com/REPOSITORY/' \
+                   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          VERIFY
+          sed -i "s|REPOSITORY|${GITHUB_REPOSITORY}|" SHA256SUMS.verify.md
+
+      # Build provenance for every attached artifact (SEC-042).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            release/*.whl
+            release/*.tar.gz
+            release/*.msi
+            release/*.AppImage
+            release/*.snap
+            release/*.flatpak
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}

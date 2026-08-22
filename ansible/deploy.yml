@@ -11,6 +11,23 @@
   gather_facts: true
 
   tasks:
+    # SEC-035: refuse to deploy from a mutable ref unless it was asked for
+    # explicitly. A branch name here means the fleet installs whatever main
+    # happened to contain at the moment each host ran.
+    - name: Refuse to deploy from a mutable git ref
+      ansible.builtin.assert:
+        that:
+          - commatrix_allow_mutable_ref | bool
+            or commatrix_version not in commatrix_mutable_refs
+        fail_msg: >-
+          commatrix_version is '{{ commatrix_version }}', a mutable branch.
+          Pin it to a release tag or a full commit SHA, or set
+          commatrix_allow_mutable_ref=true to accept a moving target.
+        quiet: true
+      run_once: true
+      delegate_to: localhost
+      become: false
+
     - name: Ensure python3 (>=3.9) is present
       ansible.builtin.command: python3 --version
       changed_when: false
@@ -28,7 +45,12 @@
         cmd: "bash install.sh --no-start {{ '--as-root' if commatrix_run_as_root | bool else '' }}"
         chdir: "{{ commatrix_src_dir }}"
       register: commatrix_install
-      changed_when: "'installing' in commatrix_install.stdout | lower"
+      # CODE-034: this used to be 'changed_when: true' on some tasks and a
+      # substring match here that never matched the real output, so the play
+      # reported a change on every run and idempotence was meaningless.
+      # install.sh prints an explicit marker; anything else is a no-op run.
+      changed_when: >-
+        commatrix_install.stdout is search('(?i)(installing|installed|updated|creating)')
 
     - name: Deploy managed configuration
       ansible.builtin.template:
@@ -38,6 +60,27 @@
         group: root
         mode: "0644"
       notify: restart commatrix
+
+    # SEC-034: grant the capability set instead of running the whole collector
+    # as root. Skipped when the operator explicitly chose the root fallback.
+    - name: Grant least-privilege capabilities to the service user
+      ansible.builtin.command:
+        cmd: >-
+          /usr/bin/commatrix elevate-linux
+          --profile {{ commatrix_elevate_profile }}
+      register: commatrix_elevate_run
+      changed_when: >-
+        commatrix_elevate_run.stdout is search('(?i)(granted|created|added|wrote)')
+      when:
+        - commatrix_elevate | bool
+        - not (commatrix_run_as_root | bool)
+
+    - name: Warn that the collector runs as root
+      ansible.builtin.debug:
+        msg: >-
+          commatrix_run_as_root is true: the collector runs with full root
+          privileges instead of the elevate-linux capability set (SEC-034).
+      when: commatrix_run_as_root | bool
 
     - name: Enable and start the collector
       ansible.builtin.systemd:
