@@ -416,3 +416,61 @@ class TaskSchedulerXmlOrderTest(unittest.TestCase):
         root = ElementTree.fromstring(xml)  # must not raise
         args = root.find(f"{self.NS}Actions/{self.NS}Exec/{self.NS}Arguments")
         self.assertIn("a&b<c>", args.text)
+
+
+class VerificationScriptsTest(unittest.TestCase):
+    """The items that need a real Windows host or a registry ship a runner.
+
+    They cannot be executed here, so what is checked is that the scripts exist,
+    are syntactically valid, and actually assert the things the review asked
+    about -- a verification script that quietly checks nothing is worse than
+    no script, because it produces a green line.
+    """
+
+    WIN = os.path.join(REPO, "packaging", "windows", "verify-windows.ps1")
+    CONTAINER = os.path.join(REPO, "packaging", "verify-container.sh")
+
+    def test_container_script_is_valid_bash(self):
+        proc = subprocess.run(["bash", "-n", self.CONTAINER],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_container_script_does_not_ask_the_docker_driver_for_attestations(self):
+        """The default driver refuses them, which would break the whole run."""
+
+        with open(self.CONTAINER, encoding="utf-8") as fh:
+            text = fh.read()
+        for line in text.splitlines():
+            if "--load" in line:
+                self.assertNotIn("--provenance", line)
+                self.assertNotIn("--sbom", line)
+
+    def test_container_script_covers_the_uid_65532_split(self):
+        with open(self.CONTAINER, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("--user 0", text)
+        self.assertIn("65532", text)
+
+    def test_windows_script_covers_every_open_finding(self):
+        with open(self.WIN, encoding="utf-8") as fh:
+            text = fh.read()
+        for finding in ("SEC-023", "SEC-025", "SEC-022", "CODE-031", "CODE-027"):
+            self.assertIn(finding, text, f"{finding} is not verified by the script")
+
+    def test_windows_script_checks_s4u_rather_than_just_success(self):
+        with open(self.WIN, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("<LogonType>S4U</LogonType>", text)
+        self.assertIn("falling back to 'schtasks /rp'", text)
+        self.assertIn("LeastPrivilege", text)
+
+    def test_windows_script_refuses_to_run_unelevated(self):
+        with open(self.WIN, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("IsInRole", text)
+        self.assertIn("must run elevated", text)
+
+    def test_windows_script_offers_a_way_back(self):
+        with open(self.WIN, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("-Revoke", text)

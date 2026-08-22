@@ -80,6 +80,15 @@ Also closed as far as this environment allows:
 - **The S4U task XML** is validated against Microsoft's documented schema sequences for `Task`, `Settings`, `Principal` and `Exec`. Task Scheduler uses `xsd:sequence`, not `xsd:all`, so otherwise-valid XML in the wrong order is rejected at registration — the one step that cannot be tried without a Windows host.
 - **The sigstore invocation**: `--bundle`, `--cert-identity` and `--cert-oidc-issuer` all exist, with those exact spellings, in sigstore 4.5.0.
 
+### Runners for what still needs real hardware
+
+The last items need a Windows host or registry access. They ship as scripts so the answer is an output rather than a recollection, and so re-running them after a change is cheap:
+
+- `packaging/windows/verify-windows.ps1` — checks SEC-023 (the task really is registered with `LogonType=S4U`, `UserId=commatrix`, `RunLevel=LeastPrivilege`, and neither the `schtasks /rp` nor the `net user` fallback was taken), SEC-025 (the task's Last Result is 0, not Access Denied, after the rebind), SEC-022 (attribution works without SeDebugPrivilege), CODE-031 and CODE-027. `-DryRun` checks what can be checked without touching the machine; `-Revoke` puts it back.
+- `packaging/verify-container.sh` — builds from the pinned digest, verifies the provenance and SBOM attestations, and reproduces the documented UID split (`collect` as `--user 0`, `report` as the default 65532). Writing it caught a trap worth knowing about: `--provenance`/`--sbom` are rejected outright by buildx's default `docker` driver, so the script builds plainly for the functional checks and spins up a `docker-container` builder writing an OCI layout for the attestation checks — which needs a registry only for the base image.
+
+Note for anyone who verified an earlier build: the S4U task registration, the Sigstore step in the MSI build, and the ACL change that adds the service account are **new here**. They did not exist in 1.1.0, so earlier Windows testing does not cover them. The same applies to Ansible, where `deploy.yml` no longer runs the collector as root and refuses `commatrix_version: "main"`.
+
 ### Notes on the review itself
 
 - **SEC-028** could not be fixed the way it is usually written. The standard approach — hooking expat through `XMLParser.parser` — does nothing on Python 3.9+, because `xml.etree` no longer exposes that attribute; code written that way passes its own tests while providing no protection. Replaced with a pre-parse rejection of DOCTYPE/ENTITY/NOTATION markup.

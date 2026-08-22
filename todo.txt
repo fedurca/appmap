@@ -116,8 +116,11 @@ Docker: ověřeno, co bez registry jde
 [x] `docker buildx build --check` prochází bez jediného varování
     (spuštěno s dočasně nahrazeným FROM, protože proxy blokuje
     registry-1.docker.io)
-[ ] skutečný build + `docker buildx imagetools inspect` (SBOM,
-    provenance) — potřebuje přístup do registry
+[ ] skutečný build + attestace — potřebuje přístup do registry.
+    Spusť:  bash packaging/verify-container.sh
+    Pozn.: attestace nejdou přes výchozí "docker" driver (odmítne je);
+    skript si na to vytvoří docker-container builder a staví do OCI
+    layoutu, takže registry potřebuje jen pro base image.
 
 Windows: ověřeno vše kromě skutečného stroje
 ---------------------------------------------
@@ -128,16 +131,31 @@ Windows: ověřeno vše kromě skutečného stroje
     Ověřen i escaping a to, že Actions Context odpovídá Principal id.
 [x] sigstore CLI: flagy --bundle / --cert-identity / --cert-oidc-issuer
     v sigstore 4.5.0 existují přesně v té podobě, jak je build volá
-[ ] elevate-windows bez --allow-sedebug — funguje atribuce?
-[ ] elevate-windows: úloha po restartu naběhne pod 'commatrix' bez
-    uloženého hesla? Fallback na /rp se hlásí warningem — když ho
-    uvidíš, S4U selhalo.
-[ ] elevate-windows: po rebindu musí být DB zapisovatelná pro servisní
-    účet (SEC-025)
+Všechno níže pokrývá jeden skript — spusť ho v POVÝŠENÉM PowerShellu
+na testovacím stroji nebo VM se snapshotem (dělá reálné změny):
+
+    powershell -ExecutionPolicy Bypass -File packaging\windows\verify-windows.ps1
+
+    -DryRun   jen to, co nic nemění
+    -Revoke   vrátí stroj zpět
+
+[ ] SEC-023 úloha registrovaná přes S4U XML, LogonType=S4U,
+    UserId=commatrix, RunLevel=LeastPrivilege, a v outputu NENÍ
+    "falling back to 'schtasks /rp'" ani "falling back to 'net user'"
+[ ] SEC-025 po rebindu je DB zapisovatelná pro servisní účet
+    (Last Result úlohy musí být 0, ne 0x5)
+[ ] SEC-022 atribuce funguje bez SeDebugPrivilege
+[ ] CODE-031 CPU governor měří nenulovou hodnotu
+[ ] CODE-027 DNS řádky nerostou skokově přes polly
 [ ] MSI build: projde `python -m sigstore verify identity` proti
     skutečnému .sigstore bundlu na windows-latest runneru?
-[ ] CPU governor (CODE-031): os.times() na skutečných Windows
-[ ] WinDnsMonitor bookmark (CODE-027) proti skutečnému event logu
+    (flagy ověřené proti sigstore 4.5.0, chybí jen reálný bundle)
+
+POZOR — tohle je NOVÝ kód, který v 1.1.0 neexistoval:
+  S4U registrace úlohy, Sigstore krok v MSI buildu, a ACL, které nově
+  přidává servisní účet. Dřívější ověření Windows buildu se na ně
+  nevztahuje. Stejně tak Ansible: deploy.yml už neběží jako root
+  a odmítne commatrix_version: "main".
 
 
 CO SE UDĚLALO (na větvi fix/review-medium)
