@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import logging
 import socket
-import struct
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 from ...dns import IpNameCache
-from ...sni import SniEvent, _MAP_TTL, parse_ip_packet
+from ...sni import SniEvent, parse_ip_packet
 
 from ...threadguard import DrainCounters, drain_item
 

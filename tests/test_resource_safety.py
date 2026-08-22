@@ -11,7 +11,6 @@ CODE-029  Job Object BOOL return values are checked
 Every test here was verified to fail against the pre-fix code.
 """
 
-import sqlite3
 import unittest
 from unittest import mock
 

@@ -113,7 +113,7 @@ class AnsibleHardeningTest(unittest.TestCase):
 
     def setUp(self):
         try:
-            import yaml  # noqa: F401
+            __import__("yaml")
         except ImportError:
             self.skipTest("PyYAML not installed")
 

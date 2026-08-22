@@ -275,8 +275,6 @@ class WinResourcesTest(unittest.TestCase):
 
 class WinRunLoopTest(unittest.TestCase):
     def _patches(self, tmpdir):
-        from commatrix.platform.win import runloop  # noqa: F401
-
         return [
             mock.patch("commatrix.platform.win.runloop.rsrc.process_cpu_seconds",
                        side_effect=[0.0, 0.05] * 20),

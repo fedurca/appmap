@@ -32,7 +32,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .threadguard import DrainCounters, drain_item, drain_iteration
+from .threadguard import DrainCounters, drain_item
 
 log = logging.getLogger("commatrix.dns")
 
