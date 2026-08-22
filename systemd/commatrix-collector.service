@@ -60,5 +60,41 @@ RuntimeDirectoryMode=0750
 StateDirectory=commatrix
 StateDirectoryMode=0750
 
+# --- Generic confinement --------------------------------------------------
+# Verified with: systemd-analyze security --offline=true (systemd 255).
+# None of these restrict anything the collector does; leaving them off simply
+# left exposure on the table (this unit measured 6.4 MEDIUM without them).
+#
+# Deliberately NOT set here, do not "fix" the systemd-analyze findings for them:
+#   ProtectKernelTunables  - the collector's job is toggling the nf_conntrack
+#                            sysctls and restoring them in ExecStopPost; this
+#                            would remount /proc/sys read-only (already false
+#                            above, kept explicit).
+#   ProtectSystem=strict   - correct, but it needs to know which directories
+#                            the operator configured for the database, HTML
+#                            report and snapshots. 'commatrix elevate-linux'
+#                            reads the config and emits it together with the
+#                            matching ReadWritePaths; a static unit cannot.
+#   RestrictAddressFamilies - the collector legitimately needs AF_UNIX (the
+#                            resolved monitor), AF_NETLINK (ct-netlink and
+#                            sock_diag), AF_INET/AF_INET6 (SNTP, zabbix_get,
+#                            reverse DNS) and AF_PACKET when SNI capture is
+#                            enabled. An allow list that omits AF_PACKET
+#                            breaks SNI silently at runtime.
+#   UMask=0077             - the data is deliberately group-readable by the
+#                            'commatrix' group (0640/0750); systemd-analyze
+#                            flags this and it is the intended design.
+PrivateDevices=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RemoveIPC=true
+
 [Install]
 WantedBy=multi-user.target

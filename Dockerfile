@@ -45,9 +45,19 @@ ENV PYTHONPATH=/opt/commatrix \
 WORKDIR /opt/commatrix
 
 # Default to an unprivileged UID (SEC-044). Live capture overrides this with
-# --user 0 plus the three --cap-add flags above. Note for report/aggregate: a
-# bind-mounted output directory must be writable by UID 65532, or pass
-# --user "$(id -u):$(id -g)" to match the host owner.
+# --user 0 plus the three --cap-add flags above.
+#
+# Verified, and it was not what the note here used to claim: the constraint is
+# the DATABASE directory, not the output directory. The database runs in WAL
+# mode, and a read-only WAL reader still has to create the -shm file beside it,
+# which needs write permission on that directory. With `collect` run as
+# --user 0 and `report` as the default 65532, every read-only command used to
+# fail with "attempt to write a readonly database" on its first query.
+# commatrix now falls back to SQLite immutable mode and warns, so reports work
+# either way -- but for a live database, prefer giving 65532 write access to
+# the directory so the write-ahead log is included:
+#   chown -R 65532:65532 /var/lib/commatrix
+# or run with  --user "$(id -u):$(id -g)"  to match the host owner.
 RUN useradd --system --uid 65532 --no-create-home --shell /usr/sbin/nologin commatrix
 USER 65532:65532
 

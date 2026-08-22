@@ -42,6 +42,7 @@ DOCKERFILE = os.path.join(REPO_ROOT, "Dockerfile")
 PY_EMBED_MANIFEST = os.path.join(
     REPO_ROOT, "packaging", "windows", "python-embed-sha256.txt"
 )
+POLICY_FILE = os.path.join(REPO_ROOT, "packaging", "supply-chain-policy.json")
 
 USER_AGENT = "commatrix-pin-supply-chain"
 TIMEOUT = 30
@@ -62,6 +63,54 @@ _FROM_RE = re.compile(
 # Actions published by GitHub itself and by well-known vendors still need
 # pinning; there is no allowlist. Local (./path) and docker:// uses are skipped.
 _SKIP_PREFIXES = ("./", "../", "docker://")
+
+
+def load_policy() -> dict:
+    """Whether an unpinned dependency fails the build, or only warns.
+
+    Bootstrap problem: the pins can only be produced by a run with network
+    access to api.github.com, the registry and python.org. Shipping a check
+    that hard-fails before anyone has had the chance to run it means CI is red
+    on arrival for a reason nobody can fix from a pull request -- and a
+    permanently red build is one people stop reading, which costs more than
+    this finding does.
+
+    So the check starts in "warn" mode: it prints every unpinned dependency as
+    a GitHub warning annotation and exits 0. `--write` flips it to "enforce"
+    once real pins exist, after which any regression fails the build. Flip it
+    by hand if you would rather the build stayed red until then.
+    """
+
+    default = {
+        "enforce": False,
+        "note": (
+            "Set by packaging/pin_supply_chain.py --write once real pins exist. "
+            "While false, unpinned dependencies are reported as warnings "
+            "instead of failing CI."
+        ),
+    }
+    try:
+        with open(POLICY_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    default.update(data)
+    return default
+
+
+def save_policy(policy: dict) -> None:
+    with open(POLICY_FILE, "w", encoding="utf-8") as fh:
+        json.dump(policy, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+
+
+def _annotate(level: str, message: str) -> None:
+    """Emit a GitHub Actions annotation when running in CI."""
+
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{level}::{message}")
 
 
 def _get(url: str, headers=None) -> bytes:
@@ -287,6 +336,9 @@ def main(argv=None) -> int:
                        help="report unpinned dependencies and exit non-zero (offline)")
     group.add_argument("--write", action="store_true",
                        help="resolve pins upstream and rewrite the files (needs network)")
+    ap.add_argument("--enforce", action="store_true",
+                    help="fail on unpinned dependencies even while the policy "
+                         "file still has enforce=false")
     ap.add_argument("--python-version", default=None,
                     help="embeddable Python version to pin (default: from build_msi.ps1)")
     args = ap.parse_args(argv)
@@ -294,17 +346,36 @@ def main(argv=None) -> int:
     py_version = args.python_version or default_python_version()
 
     if args.check:
+        policy = load_policy()
+        enforce = bool(policy.get("enforce")) or args.enforce
         problems = check_actions() + check_dockerfile() + check_python_embed(py_version)
+        level = "error" if enforce else "warning"
         for p in problems:
             print(f"UNPINNED: {p}")
-        if problems:
-            print(
-                f"\n{len(problems)} unpinned dependency/dependencies. "
-                "Run: python packaging/pin_supply_chain.py --write",
-                file=sys.stderr,
-            )
+            _annotate(level, f"unpinned dependency: {p}")
+        if not problems:
+            print("All supply-chain dependencies are pinned.")
+            if not enforce:
+                print(
+                    "Everything is pinned but enforcement is still off. "
+                    "Set \"enforce\": true in packaging/supply-chain-policy.json "
+                    "(or re-run --write) so a regression fails the build."
+                )
+            return 0
+        summary = (
+            f"{len(problems)} unpinned dependency/dependencies. "
+            "Run: python packaging/pin_supply_chain.py --write"
+        )
+        if enforce:
+            print("\n" + summary, file=sys.stderr)
             return 1
-        print("All supply-chain dependencies are pinned.")
+        print(
+            "\n" + summary
+            + "\n\nReported as warnings because packaging/supply-chain-policy.json "
+              "has enforce=false: the pins need one run with network access to "
+              "api.github.com, the registry and python.org, which a pull request "
+              "cannot provide. --write flips enforcement on."
+        )
         return 0
 
     changed = []
@@ -325,6 +396,21 @@ def main(argv=None) -> int:
         print(f"FAILED: {err}", file=sys.stderr)
     if not changed and not errors:
         print("Nothing to pin.")
+
+    # Turn enforcement on once nothing is left unpinned, so the next regression
+    # fails the build instead of warning.
+    remaining = check_actions() + check_dockerfile() + check_python_embed(py_version)
+    policy = load_policy()
+    if not remaining and not policy.get("enforce"):
+        policy["enforce"] = True
+        save_policy(policy)
+        print("pinned: packaging/supply-chain-policy.json (enforcement enabled)")
+    elif remaining:
+        print(
+            f"\n{len(remaining)} dependency/dependencies still unpinned; "
+            "enforcement stays off.",
+            file=sys.stderr,
+        )
     return 1 if errors else 0
 
 

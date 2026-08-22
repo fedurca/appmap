@@ -88,3 +88,56 @@ jobs:
           python-version: "3.12"
       - name: Check supply-chain pins
         run: python packaging/pin_supply_chain.py --check
+
+  hardening:
+    # The review deferred these to "verify on a real machine". Both tools run
+    # offline (systemd-analyze security --offline= needs systemd v247+, ubuntu
+    # -latest ships 255), so they run on every commit instead of once by hand:
+    #   * visudo -cf over the sudoers drop-ins install-service.sh and
+    #     install-lab-sudoers.sh generate;
+    #   * systemd-analyze security over every shipped unit AND over the
+    #     collector unit with each elevate-linux drop-in merged in, against a
+    #     recorded per-unit exposure budget.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tool versions
+        run: |
+          systemd-analyze --version | head -1
+          visudo --version | head -1
+      - name: sudoers + systemd unit review
+        run: python packaging/check_hardening.py --report
+
+  container-uid:
+    # The image defaults to USER 65532 while `collect` typically runs as root,
+    # so read-only commands hit a database directory they cannot write. That
+    # broke every documented report/export invocation; this reproduces the
+    # exact UID split without needing a Docker daemon.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build a database as root, read it as UID 65532
+        run: |
+          sudo mkdir -p /srv/cm && sudo chmod 0755 /srv/cm
+          sudo python -m commatrix collect --allow-manual --iterations 1 \
+            --database /srv/cm/c.db || true
+          sudo python - <<'PY'
+          from commatrix.store import Store, EdgeObservation
+          s = Store('/srv/cm/c.db')
+          s.upsert_host('h', {'hostname': 'h'})
+          s.record_edge('h', EdgeObservation(
+              proto='tcp', direction='inbound', local_ip='10.0.0.1',
+              peer_ip='203.0.113.9', service_port=443, peer_class='external',
+              snapshot_bytes=10, snapshot_packets=1, service_side='local'), now=100.0)
+          s.close()
+          PY
+          sudo chmod 0644 /srv/cm/c.db
+          sudo setpriv --reuid 65532 --regid 65532 --clear-groups \
+            python -m commatrix report -f markdown --database /srv/cm/c.db
+

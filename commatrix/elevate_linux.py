@@ -84,7 +84,76 @@ _ATTRIBUTION_WARNING = (
 ELEVATE_CAPS = CAP_PROFILES[DEFAULT_PROFILE]
 
 
-def render_dropin(profile: str = DEFAULT_PROFILE) -> str:
+# Confinement that is not specific to any one capability: it costs the
+# collector nothing and applies to every profile.
+#
+# Found by running `systemd-analyze security --offline=true` on the merged
+# base-unit + drop-in: the whole sandbox block used to sit inside the
+# `attribution` branch, so `--profile topology` -- the profile you choose when
+# you want *less* privilege -- produced a LESS confined service than
+# `attribution`, and a slightly worse one than the un-elevated base unit
+# (exposure 6.5 vs 6.4 vs 5.2), because it added CAP_NET_RAW and none of the
+# mitigations. That inverts the point of having a lower profile.
+_COMMON_CONFINEMENT = (
+    "SystemCallArchitectures=native\n"
+    "ProtectSystem=strict\n"
+    "PrivateTmp=true\n"
+    "RestrictNamespaces=true\n"
+    "RestrictSUIDSGID=true\n"
+    "LockPersonality=true\n"
+    "MemoryDenyWriteExecute=true\n"
+    "ProtectHostname=true\n"
+    "ProtectClock=true\n"
+    "ProtectKernelLogs=true\n"
+    "RestrictRealtime=true\n"
+    "RemoveIPC=true\n"
+    # ProtectKernelTunables is deliberately NOT set here: it remounts /proc/sys
+    # read-only, and toggling net.netfilter.nf_conntrack_acct (and restoring it
+    # in ExecStopPost) is the collector's job. The base unit sets it to false
+    # for the same reason -- do not "fix" the systemd-analyze finding for it.
+)
+
+# Paths systemd always makes writable for us, so they never need an explicit
+# ReadWritePaths entry: StateDirectory=/RuntimeDirectory= in the base unit.
+_IMPLICIT_RW_PATHS = ("/var/lib/commatrix", "/run/commatrix")
+
+
+def _extra_read_write_paths(config=None) -> List[str]:
+    """Directories outside the StateDirectory that the collector must write.
+
+    ProtectSystem=strict makes the whole hierarchy read-only apart from /dev,
+    /proc, /sys and whatever is listed as writable. StateDirectory= and
+    RuntimeDirectory= cover /var/lib/commatrix and /run/commatrix
+    automatically, so the two do not conflict -- but an operator who points
+    `database`, `html_report_path` or `snapshot_dir` somewhere else (a shared
+    /srv export, a mounted volume) gets a read-only filesystem at the first
+    write, long after elevate-linux reported success. Collect those paths and
+    grant them explicitly.
+    """
+
+    if config is None:
+        return []
+
+    candidates = []
+    for attr in ("database", "html_report_path", "sysctl_state_file"):
+        value = getattr(config, attr, None)
+        if value:
+            candidates.append(os.path.dirname(os.path.abspath(str(value))))
+    snapshot_dir = getattr(config, "snapshot_dir", None)
+    if snapshot_dir:
+        candidates.append(os.path.abspath(str(snapshot_dir)))
+
+    extra: List[str] = []
+    for path in candidates:
+        if any(path == base or path.startswith(base + os.sep)
+               for base in _IMPLICIT_RW_PATHS):
+            continue
+        if path not in extra:
+            extra.append(path)
+    return sorted(extra)
+
+
+def render_dropin(profile: str = DEFAULT_PROFILE, config=None) -> str:
     caps = " ".join(CAP_PROFILES[profile])
     lines = [
         "# Managed by: commatrix elevate-linux\n",
@@ -96,32 +165,34 @@ def render_dropin(profile: str = DEFAULT_PROFILE) -> str:
         f"AmbientCapabilities={caps}\n",
         f"CapabilityBoundingSet={caps}\n",
         "NoNewPrivileges=true\n",
+        "\n",
+        "# --- confinement applied to every profile -----------------------\n",
+        _COMMON_CONFINEMENT,
     ]
+
+    # /var/lib/commatrix and /run/commatrix come from StateDirectory= and
+    # RuntimeDirectory= in the base unit and are writable under
+    # ProtectSystem=strict without being named here. Anything the operator
+    # configured elsewhere does need naming.
+    for path in _extra_read_write_paths(config):
+        lines.append(f"ReadWritePaths={path}\n")
 
     if profile == "attribution":
         lines += [
             "\n",
-            "# --- confinement for the attribution capabilities ---------------\n",
+            "# --- confinement specific to the attribution capabilities -------\n",
             "# CAP_SYS_PTRACE would otherwise allow attaching to a root process\n",
             "# and executing code in it. /proc reads do not use the ptrace(2)\n",
             "# syscall (the kernel's ptrace_may_access check is internal), so\n",
             "# blocking these three syscalls removes the escalation primitive\n",
             "# while leaving attribution working.\n",
             "SystemCallFilter=~@debug ptrace process_vm_readv process_vm_writev\n",
-            "SystemCallArchitectures=native\n",
             "# CAP_DAC_READ_SEARCH bypasses DAC on every file, so a permission\n",
             "# check cannot keep it out of /root/.ssh or /etc/ssl/private. It\n",
             "# cannot, however, bypass a mount namespace -- these directives\n",
             "# remove the paths from the collector's view entirely.\n",
             "ProtectHome=tmpfs\n",
-            "ProtectSystem=strict\n",
-            "PrivateTmp=true\n",
             "InaccessiblePaths=-/etc/ssl/private -/etc/ssh -/var/lib/secrets\n",
-            "ReadWritePaths=/var/lib/commatrix\n",
-            "RestrictNamespaces=true\n",
-            "RestrictSUIDSGID=true\n",
-            "LockPersonality=true\n",
-            "MemoryDenyWriteExecute=true\n",
         ]
     return "".join(lines)
 
@@ -291,8 +362,16 @@ def apply_elevate(
     dry_run: bool = False,
     reload: bool = True,
     profile: str = DEFAULT_PROFILE,
+    config=None,
 ) -> ElevateResult:
-    """Grant ambient caps + polkit DNS to the service account."""
+    """Grant ambient caps + polkit DNS to the service account.
+
+    *config* is the collector configuration, when available. It is used only to
+    work out which directories ProtectSystem=strict has to leave writable
+    (see :func:`_extra_read_write_paths`); without it the drop-in relies on
+    StateDirectory=/RuntimeDirectory= alone, which is correct for a default
+    installation.
+    """
 
     result = ElevateResult()
     if profile not in CAP_PROFILES:
@@ -360,8 +439,14 @@ def apply_elevate(
     _save_state(state_file, state)
     result.actions.append(f"saved previous state -> {state_file}")
 
-    _write_file(DROPIN_PATH, render_dropin(profile), 0o644)
+    _write_file(DROPIN_PATH, render_dropin(profile, config), 0o644)
     result.actions.append(f"wrote systemd drop-in {DROPIN_PATH}")
+    extra_rw = _extra_read_write_paths(config)
+    if extra_rw:
+        result.actions.append(
+            "granted ReadWritePaths for configured locations outside "
+            f"/var/lib/commatrix: {', '.join(extra_rw)}"
+        )
 
     try:
         _write_file(POLKIT_PATH, render_polkit(), 0o644)

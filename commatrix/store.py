@@ -213,9 +213,7 @@ class Store:
         self.event_min_gap = event_min_gap
 
         if read_only:
-            # Open without creating or writing anything (works on a DB owned by
-            # another user as long as it is group/other readable).
-            self.conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            self.conn = self._connect_read_only(path)
             self.conn.row_factory = sqlite3.Row
             self._check_schema_version(allow_schema_mismatch)
             return
@@ -253,6 +251,53 @@ class Store:
         self.init_schema()
         # Tighten permissions on files/dirs we create (best-effort).
         self._restrict_permissions(path, directory, created_dir, db_existed)
+
+    @staticmethod
+    def _connect_read_only(path: str) -> sqlite3.Connection:
+        """Open *path* read-only, coping with a read-only parent directory.
+
+        The database runs in WAL mode, and a WAL reader -- even a strictly
+        read-only one -- has to create and write the ``-shm`` shared-memory
+        file next to the database. That needs write permission on the
+        *directory*, not on the database file, and SQLite does not report the
+        problem at connect() time: it raises "attempt to write a readonly
+        database" from the first SELECT.
+
+        This is exactly the shape of the container setup the README documents:
+        `collect` runs as --user 0 and leaves /var/lib/commatrix owned by root,
+        then `report` runs as the image's default UID 65532 and cannot write
+        that directory, so every read-only command fails on a plain query.
+
+        The fallback is `immutable=1`, which tells SQLite the file will not
+        change and skips the -shm entirely. That assumption is only safe when
+        nothing is writing concurrently, so it is a fallback and it says so.
+        """
+
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            # Force the -shm allocation now rather than at the first real
+            # query, so the fallback happens here and not halfway through a
+            # report.
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            return conn
+        except sqlite3.OperationalError as exc:
+            if "readonly" not in str(exc).lower():
+                conn.close()
+                raise
+            conn.close()
+
+        immutable = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
+        log.warning(
+            "%s is a WAL database in a directory this process cannot write, so "
+            "the usual read-only open failed; falling back to immutable mode. "
+            "Any data still in the write-ahead log is NOT visible, and the "
+            "result is undefined if a collector is writing right now. Fix by "
+            "making the database directory writable for this user (in a "
+            "container: --user \"$(id -u):$(id -g)\", or chown the bind mount "
+            "to 65532), or by checkpointing the database first.",
+            path,
+        )
+        return immutable
 
     @staticmethod
     def _restrict_permissions(path, directory, created_dir, db_existed) -> None:

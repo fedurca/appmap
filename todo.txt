@@ -35,8 +35,12 @@ službám.
 Po spuštění: zkontrolovat diff, commitnout. Dependabot
 (.github/dependabot.yml) už piny drží aktuální sám.
 
-CI job supply-chain-pins bude do té doby červený. To je záměr — je to
-přesně ten nález, který hlásí.
+Do té doby CI job supply-chain-pins hlásí nálezy jako WARNING
+anotace a projde (packaging/supply-chain-policy.json, enforce=false).
+Trvale červený build je build, který nikdo nečte, a tenhle nález
+nejde opravit z pull requestu — chce jednu síťovou session. Po
+`--write` se enforce přepne na true samo a každá regrese pak build
+shodí. Pokud chceš červeno hned: enforce=true, nebo `--check --enforce`.
 
 
 2) OVĚŘENÍ NA REÁLNÉM STROJI
@@ -45,14 +49,21 @@ přesně ten nález, který hlásí.
 Nic z toho nešlo otestovat v kontejneru (chybí systemd, Windows,
 Docker daemon).
 
-Linux:
-[ ] visudo -cf na vygenerovaném /etc/sudoers.d/commatrix-control
-[ ] visudo -cf na vygenerovaném /etc/sudoers.d/commatrix-lab
-[ ] systemd-analyze security commatrix-collector.service
-    ('verify' prošlo s exit 0, 'security' potřebuje běžící systemd)
-[ ] elevate-linux --profile attribution: ProtectSystem=strict
-    + ReadWritePaths vs. StateDirectory v base unitě
+Linux — HOTOVO, ověřeno v kontejneru a zapojeno do CI:
+[x] visudo -cf na obou generovaných sudoers (i s uživatelem
+    obsahujícím tečku) — parsed OK
+[x] systemd-analyze security --offline=true na všech unitách
+    i na base+drop-in (systemd 255 umí offline režim, běžící
+    systemd není potřeba). Výsledky a nalezená vada níže.
+[x] ProtectSystem=strict vs. StateDirectory — nekolidují,
+    StateDirectory/RuntimeDirectory jsou pod strict automaticky
+    zapisovatelné. Doplněno pro případ, kdy si operátor přesune
+    database/html_report_path/snapshot_dir jinam.
+Obojí hlídá `python packaging/check_hardening.py` (CI job "hardening").
+
+Linux — zbývá ověřit na živém hostu:
 [ ] elevate-linux --profile topology: jak moc se degraduje atribuce
+    (měřitelné jen na stroji se skutečnými procesy)
 [ ] elevate-linux --revoke: nová kontrola CODE-008 hlásí, když se
     unit User nevrátil na původní hodnotu — ověřit, že nehlásí
     falešný poplach na běžné instalaci
@@ -72,8 +83,14 @@ Windows:
     ověřit, že se DNS eventy přestaly duplikovat
 
 Docker:
-[ ] image s USER 65532 — bind-mount výstupního adresáře musí být
-    zapisovatelný pro UID 65532
+[x] USER 65532 — OVĚŘENO a byla to CHYBA, jiná než zpráva čekala.
+    Problém není výstupní adresář, ale adresář DATABÁZE: čtení
+    WAL databáze vyžaduje vytvoření -shm souboru vedle ní, což
+    potřebuje právo zápisu do adresáře. Dokumentovaný scénář
+    (collect jako --user 0, report jako 65532) padal na
+    "attempt to write a readonly database" hned na prvním SELECTu.
+    Opraveno fallbackem na immutable režim s varováním; hlídá to
+    CI job "container-uid", který ten UID split reprodukuje.
 [ ] po doplnění digest pinu: build projde a
     'docker buildx imagetools inspect' ukáže SBOM i provenance
 

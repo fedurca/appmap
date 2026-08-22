@@ -166,8 +166,13 @@ def cmd_elevate_linux(args: argparse.Namespace) -> int:
     if args.revoke:
         result = revoke_elevate(state_file=state, dry_run=args.dry_run)
     else:
+        # Pass the resolved config so the drop-in can grant ReadWritePaths for
+        # a database / report / snapshot directory the operator moved outside
+        # /var/lib/commatrix; ProtectSystem=strict would otherwise make it
+        # read-only and the collector would fail at its first write.
         result = apply_elevate(
-            state_file=state, dry_run=args.dry_run, profile=args.profile
+            state_file=state, dry_run=args.dry_run, profile=args.profile,
+            config=load_config(args.config),
         )
     _write_output(result.summary_markdown(), args.output)
     return 0 if result.ok else 1

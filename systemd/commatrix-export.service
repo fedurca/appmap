@@ -37,3 +37,34 @@ CapabilityBoundingSet=
 UMask=0027
 StateDirectory=commatrix
 StateDirectoryMode=0750
+
+# --- Generic confinement (systemd-analyze security --offline=true) --------
+# The export job only reads the database and writes a JSON snapshot into the
+# StateDirectory, so it can take the full set: unlike the collector it never
+# touches /proc/sys and never opens a packet socket.
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @debug @mount @swap @reboot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RemoveIPC=true
+# ProtectProc=invisible hides other processes; the export job only reads its
+# own database. ProcSubset=pid is deliberately NOT set - it would also hide
+# /proc/meminfo and friends, which the host-parameter fallback reads.
+ProtectProc=invisible
+# IPAddressDeny=any is deliberately NOT set: this unit doubles as the 'push'
+# transport (see the commented ExecStart above), which needs egress to the
+# central server. If you keep the default local-export ExecStart, adding
+#     IPAddressDeny=any
+# here costs nothing; if you enable push, allow the central host explicitly
+#     IPAddressDeny=any
+#     IPAddressAllow=<central-ip>/32
+

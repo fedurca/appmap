@@ -78,6 +78,57 @@ class PinToolTest(unittest.TestCase):
                 "writes the real one",
             )
 
+    def test_bootstrap_mode_warns_instead_of_failing(self):
+        """The pins need a networked run that a pull request cannot provide.
+
+        A check that is red on arrival for a reason nobody can fix from a PR is
+        a check people stop reading, so it starts in warn mode and --write
+        ratchets it to enforce.
+        """
+
+        proc = subprocess.run(
+            [sys.executable, os.path.join(REPO, "packaging", "pin_supply_chain.py"),
+             "--check"],
+            capture_output=True, text=True, cwd=REPO,
+            env={**os.environ, "GITHUB_ACTIONS": "true"},
+        )
+        sys.path.insert(0, os.path.join(REPO, "packaging"))
+        try:
+            import pin_supply_chain as psc
+            enforcing = bool(psc.load_policy().get("enforce"))
+        finally:
+            sys.path.pop(0)
+        if enforcing:
+            self.assertEqual(proc.returncode, 0,
+                             "enforcement is on, so everything must be pinned")
+        else:
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("::warning::", proc.stdout)
+            self.assertNotIn("::error::", proc.stdout)
+
+    def test_enforce_flag_makes_it_fail_now(self):
+        proc = subprocess.run(
+            [sys.executable, os.path.join(REPO, "packaging", "pin_supply_chain.py"),
+             "--check", "--enforce"],
+            capture_output=True, text=True, cwd=REPO,
+        )
+        sys.path.insert(0, os.path.join(REPO, "packaging"))
+        try:
+            import pin_supply_chain as psc
+            unpinned = (psc.check_actions() + psc.check_dockerfile()
+                        + psc.check_python_embed(psc.default_python_version()))
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(proc.returncode, 1 if unpinned else 0)
+
+    def test_policy_file_is_present_and_parsable(self):
+        import json
+        with open(os.path.join(REPO, "packaging", "supply-chain-policy.json"),
+                  encoding="utf-8") as fh:
+            policy = json.load(fh)
+        self.assertIn("enforce", policy)
+        self.assertIsInstance(policy["enforce"], bool)
+
     def test_dependabot_watches_actions_and_docker(self):
         cfg = _read(".github", "dependabot.yml")
         self.assertIn("github-actions", cfg)
