@@ -43,6 +43,23 @@ _QTYPES = {1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR", 15: "MX",
 # How long a resolved name is kept usable for enriching flows.
 _MAP_TTL = 900.0
 
+# SEC-012: the varlink framing is NUL-terminated JSON with no declared length,
+# so a peer that never sends a NUL would grow the receive buffer without limit.
+# A real QueryResult is a few hundred bytes; 1 MiB is several orders of
+# magnitude of headroom before we treat the stream as hostile and reset it.
+MAX_MESSAGE_BYTES = 1 << 20
+
+# SEC-013 / CODE-013: reconnect backoff. A clean EOF used to fall straight out
+# of the read loop and reconnect immediately, spinning at the speed of the
+# kernel whenever resolved closed the socket on us.
+_RECONNECT_BACKOFF_MIN = 1.0
+_RECONNECT_BACKOFF_MAX = 60.0
+
+# json.loads recurses per nesting level; a deeply nested document raises
+# RecursionError, which is not an Exception subclass path anyone expects and
+# used to kill the monitor thread outright.
+_JSON_MAX_DEPTH = 100
+
 
 @dataclass
 class DnsEvent:
@@ -104,6 +121,37 @@ def _addr_from_bytes(raw: object) -> Optional[str]:
     return None
 
 
+def _exceeds_depth(raw: bytes, limit: int) -> bool:
+    """Cheap structural depth pre-check for a JSON document (SEC-013).
+
+    Counts bracket nesting outside of string literals. It never has to be
+    exact -- it only has to reject documents nested far past anything
+    systemd-resolved emits, before ``json.loads`` blows the C stack.
+    """
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # closing quote
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x7B, 0x5B):  # { [
+            depth += 1
+            if depth > limit:
+                return True
+        elif byte in (0x7D, 0x5D):  # } ]
+            depth -= 1
+    return False
+
+
 def parse_query_result(params: Dict[str, object]) -> Optional[DnsEvent]:
     """Turn one monitor ``QueryResult`` payload into a :class:`DnsEvent`."""
 
@@ -157,6 +205,10 @@ class DnsMonitor(threading.Thread):
         self._ip_names: Dict[str, Tuple[str, float]] = {}
         self._stop = threading.Event()
         self._sock: Optional[socket.socket] = None
+        self._backoff = _RECONNECT_BACKOFF_MIN
+        # Counters kept for observability and for regression tests.
+        self.oversize_resets = 0
+        self.malformed_messages = 0
         # Set when the resolver rejected the subscription (needs root/polkit);
         # retrying would just spam, so we give up in that case.
         self.auth_failed = False
@@ -199,6 +251,10 @@ class DnsMonitor(threading.Thread):
                 }
 
     def run(self) -> None:
+        # CODE-013: every exit from _run_once() -- error *or* clean EOF -- has
+        # to be followed by a wait, otherwise a resolved restart turns this
+        # thread into a busy reconnect loop. The wait lives in finally so no
+        # exit path can skip it, and it backs off exponentially.
         while not self._stop.is_set() and not self.auth_failed:
             try:
                 self._run_once()
@@ -206,7 +262,14 @@ class DnsMonitor(threading.Thread):
                 if self._stop.is_set():
                     break
                 log.debug("dns monitor connection error: %s; retrying", exc)
-                self._stop.wait(5.0)
+            except Exception as exc:  # noqa: BLE001 - never let the thread die
+                if self._stop.is_set():
+                    break
+                log.warning("dns monitor loop error: %s; retrying", exc, exc_info=True)
+            finally:
+                if not self._stop.is_set() and not self.auth_failed:
+                    self._stop.wait(self._backoff)
+                    self._backoff = min(self._backoff * 2, _RECONNECT_BACKOFF_MAX)
 
     def _run_once(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -215,6 +278,9 @@ class DnsMonitor(threading.Thread):
             sock.settimeout(5.0)
             sock.connect(self.path)
             sock.sendall(json.dumps(_SUBSCRIBE).encode("utf-8") + b"\x00")
+            # A subscription that got this far is healthy; reset the backoff so
+            # a long-lived connection that eventually drops reconnects fast.
+            self._backoff = _RECONNECT_BACKOFF_MIN
             buf = b""
             while not self._stop.is_set():
                 try:
@@ -228,6 +294,19 @@ class DnsMonitor(threading.Thread):
                     raw, buf = buf.split(b"\x00", 1)
                     if raw:
                         self._handle_message(raw)
+                # SEC-012: whatever is left is an unterminated partial message.
+                # Cap it; a peer streaming megabytes without a NUL is either
+                # broken or malicious, and either way we drop the connection
+                # rather than buffering it.
+                if len(buf) > MAX_MESSAGE_BYTES:
+                    self.oversize_resets += 1
+                    log.warning(
+                        "dns monitor: dropping connection, unterminated message "
+                        "exceeded %d bytes",
+                        MAX_MESSAGE_BYTES,
+                    )
+                    buf = b""
+                    break
         finally:
             self._sock = None
             try:
@@ -236,9 +315,21 @@ class DnsMonitor(threading.Thread):
                 pass
 
     def _handle_message(self, raw: bytes) -> None:
+        # SEC-013: json.loads recurses once per nesting level, so a payload of
+        # 100k open brackets raises RecursionError. That is not caught by the
+        # ValueError arm and used to unwind the whole monitor thread, leaving
+        # the collector running with DNS enrichment silently dead. Reject
+        # obviously over-nested documents up front, and treat any decode
+        # failure -- RecursionError included -- as a dropped message.
         try:
+            if _exceeds_depth(raw, _JSON_MAX_DEPTH):
+                self.malformed_messages += 1
+                log.debug("dns monitor: rejected over-nested message")
+                return
             msg = json.loads(raw.decode("utf-8", "replace"))
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+            self.malformed_messages += 1
+            log.debug("dns monitor: unparsable message dropped (%s)", exc)
             return
         if not isinstance(msg, dict):
             return

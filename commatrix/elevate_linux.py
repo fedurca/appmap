@@ -17,6 +17,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .platform import DATA_FILE_MODE
+
 try:
     import pwd
 except ImportError:  # Windows — elevate-linux is Linux-only
@@ -237,7 +239,7 @@ def _save_state(path: str, state: Dict[str, Any]) -> None:
         fh.write("\n")
     os.replace(tmp, path)
     try:
-        os.chmod(path, 0o640)
+        os.chmod(path, DATA_FILE_MODE)
     except OSError:
         pass
 

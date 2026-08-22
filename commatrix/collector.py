@@ -66,9 +66,17 @@ class Collector:
 
     # -- socket / process context --------------------------------------
     def _socket_indexes(
-        self, sockets: List[SocketEntry]
+        self,
+        sockets: List[SocketEntry],
+        inode_to_pid: Optional[Dict[int, int]] = None,
     ) -> Tuple[Dict[Tuple[str, str, int, str, int], int], Dict[Tuple[str, int], int]]:
-        inode_to_pid = build_inode_to_pid()
+        # CODE-010: the /proc walk is per-poll state, not per-namespace state.
+        # It used to run once per network namespace, so a host with 60
+        # containers walked every /proc/<pid>/fd 61 times per poll. Callers
+        # now build it once and pass it down; the fallback keeps the method
+        # usable on its own (tests, ad-hoc calls).
+        if inode_to_pid is None:
+            inode_to_pid = build_inode_to_pid()
         established: Dict[Tuple[str, str, int, str, int], int] = {}
         listening: Dict[Tuple[str, int], int] = {}
         for s in sockets:
@@ -132,12 +140,13 @@ class Collector:
         netns_label: str,
         container_override: Optional[str] = None,
         pod_override: Optional[str] = None,
+        inode_to_pid: Optional[Dict[int, int]] = None,
     ) -> List[EdgeObservation]:
         """Normalize one namespace's entries+sockets into edge observations."""
 
         local_ips = local_ips_from_sockets(sockets)
         listening_ports = set(listening_port_map(sockets).keys())
-        established_idx, listening_idx = self._socket_indexes(sockets)
+        established_idx, listening_idx = self._socket_indexes(sockets, inode_to_pid)
 
         flows = normalize_entries(entries, local_ips, listening_ports, self.classifier)
 
@@ -233,8 +242,15 @@ class Collector:
             from .platform.win import capture as wincap
             return wincap.build_edges(self)
 
+        # CODE-010: one /proc walk per poll, shared by the host namespace and
+        # every container namespace below. /proc/<pid>/fd is global, so the
+        # host walk already covers the pids inside the other namespaces.
+        inode_to_pid = build_inode_to_pid()
+
         # Host namespace from the passed entries (event/poll snapshot).
-        edges = self._edges_from(entries, read_all_sockets(), "host")
+        edges = self._edges_from(
+            entries, read_all_sockets(), "host", inode_to_pid=inode_to_pid
+        )
 
         # Optionally capture container/other network namespaces via
         # /proc/<pid>/net/* (needs root; enumerate only returns others as root).
@@ -249,6 +265,7 @@ class Collector:
                         self._edges_from(
                             ns_entries, ns_sockets, ns.label,
                             container_override=ns.container_id, pod_override=ns.pod,
+                            inode_to_pid=inode_to_pid,
                         )
                     )
             except OSError as exc:

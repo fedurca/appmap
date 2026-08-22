@@ -8,13 +8,32 @@ distribution package (best effort via ``dpkg``/``rpm``).
 
 from __future__ import annotations
 
-import functools
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+log = logging.getLogger("commatrix.processes")
+
+# CODE-011: package resolution shells out to dpkg-query/rpm. Each call can
+# block for up to _PACKAGE_TIMEOUT seconds, and they used to run serially with
+# no cap, so a burst of previously unseen binaries (a deploy, a cron fan-out,
+# a container image swap) could stall a single poll for minutes. The lookups
+# are now budgeted per poll: unresolved binaries are simply left unresolved and
+# picked up by a later poll, which drains the backlog without ever blocking the
+# collector for long.
+_PACKAGE_TIMEOUT = 5.0
+_PACKAGE_MAX_LOOKUPS_PER_POLL = 16
+_PACKAGE_BUDGET_SECONDS = 2.0
+_PACKAGE_CACHE_MAX = 4096
+
+# exe path -> resolved package (or None when the resolver ran and found none).
+_PACKAGE_CACHE: "OrderedDict[str, Optional[str]]" = OrderedDict()
 
 _SYSTEMD_UNIT_RE = re.compile(r"/([\w@.\-\\]+\.(?:service|scope|socket|mount|slice))")
 _DOCKER_RE = re.compile(r"docker[-/]([0-9a-f]{12,64})")
@@ -126,22 +145,52 @@ def _read_uid(pid: int, proc_root: str) -> Optional[int]:
     return None
 
 
-@functools.lru_cache(maxsize=4096)
-def _package_for_path(exe: str) -> Optional[str]:
-    """Best-effort resolution of the distro package owning *exe*."""
+class PackageBudget:
+    """Per-poll budget for the subprocess-backed package resolver (CODE-011)."""
 
-    if not exe or not os.path.isabs(exe):
-        return None
-    # Strip " (deleted)" suffix that readlink adds for replaced binaries.
-    exe = exe.split(" (deleted)")[0]
+    def __init__(
+        self,
+        max_lookups: int = _PACKAGE_MAX_LOOKUPS_PER_POLL,
+        max_seconds: float = _PACKAGE_BUDGET_SECONDS,
+        clock=time.monotonic,
+    ) -> None:
+        self.max_lookups = max_lookups
+        self.max_seconds = max_seconds
+        self._clock = clock
+        self._started = clock()
+        self.lookups = 0
+        self.skipped = 0
 
+    def allows(self) -> bool:
+        if self.max_lookups >= 0 and self.lookups >= self.max_lookups:
+            return False
+        if self.max_seconds >= 0 and (self._clock() - self._started) >= self.max_seconds:
+            return False
+        return True
+
+    def spend(self) -> None:
+        self.lookups += 1
+
+    def skip(self) -> None:
+        self.skipped += 1
+
+
+def _cache_package(exe: str, value: Optional[str]) -> Optional[str]:
+    _PACKAGE_CACHE[exe] = value
+    _PACKAGE_CACHE.move_to_end(exe)
+    while len(_PACKAGE_CACHE) > _PACKAGE_CACHE_MAX:
+        _PACKAGE_CACHE.popitem(last=False)
+    return value
+
+
+def _resolve_package_uncached(exe: str) -> Optional[str]:
     if shutil.which("dpkg-query"):
         try:
             out = subprocess.run(
                 ["dpkg-query", "-S", exe],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=_PACKAGE_TIMEOUT,
                 check=False,
             )
             if out.returncode == 0 and out.stdout:
@@ -154,7 +203,7 @@ def _package_for_path(exe: str) -> Optional[str]:
                 ["rpm", "-qf", exe],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=_PACKAGE_TIMEOUT,
                 check=False,
             )
             if out.returncode == 0 and out.stdout and "not owned" not in out.stdout:
@@ -164,8 +213,43 @@ def _package_for_path(exe: str) -> Optional[str]:
     return None
 
 
+def _package_for_path(exe: str, budget: Optional[PackageBudget] = None) -> Optional[str]:
+    """Best-effort resolution of the distro package owning *exe*.
+
+    A cache hit never costs budget. A miss is only resolved while *budget*
+    still allows a subprocess call; otherwise the answer is left unresolved
+    (and uncached) so a later poll can try again.
+    """
+
+    if not exe or not os.path.isabs(exe):
+        return None
+    # Strip " (deleted)" suffix that readlink adds for replaced binaries.
+    exe = exe.split(" (deleted)")[0]
+
+    if exe in _PACKAGE_CACHE:
+        _PACKAGE_CACHE.move_to_end(exe)
+        return _PACKAGE_CACHE[exe]
+
+    if budget is not None:
+        if not budget.allows():
+            budget.skip()
+            return None
+        budget.spend()
+
+    return _cache_package(exe, _resolve_package_uncached(exe))
+
+
+def clear_package_cache() -> None:
+    """Drop the resolved-package cache (used by tests and by --refresh)."""
+
+    _PACKAGE_CACHE.clear()
+
+
 def get_process_info(
-    pid: int, proc_root: str = "/proc", resolve_package: bool = True
+    pid: int,
+    proc_root: str = "/proc",
+    resolve_package: bool = True,
+    package_budget: Optional[PackageBudget] = None,
 ) -> Optional[ProcessInfo]:
     """Collect metadata for a single pid, or ``None`` if it disappeared."""
 
@@ -180,7 +264,7 @@ def get_process_info(
     unit, container_id, runtime, pod = _parse_cgroup(cgroup_text)
     uid = _read_uid(pid, proc_root)
 
-    package = _package_for_path(exe) if resolve_package else None
+    package = _package_for_path(exe, package_budget) if resolve_package else None
 
     return ProcessInfo(
         pid=pid,
@@ -197,13 +281,30 @@ def get_process_info(
 
 
 def collect_processes(
-    pids: List[int], proc_root: str = "/proc", resolve_package: bool = True
+    pids: List[int],
+    proc_root: str = "/proc",
+    resolve_package: bool = True,
+    package_budget: Optional[PackageBudget] = None,
 ) -> Dict[int, ProcessInfo]:
     """Collect :class:`ProcessInfo` for each pid in *pids*."""
 
+    if resolve_package and package_budget is None:
+        package_budget = PackageBudget()
+
     result: Dict[int, ProcessInfo] = {}
     for pid in set(pids):
-        info = get_process_info(pid, proc_root=proc_root, resolve_package=resolve_package)
+        info = get_process_info(
+            pid,
+            proc_root=proc_root,
+            resolve_package=resolve_package,
+            package_budget=package_budget,
+        )
         if info is not None:
             result[pid] = info
+    if package_budget is not None and package_budget.skipped:
+        log.debug(
+            "package resolution budget exhausted: %d resolved, %d deferred to a later poll",
+            package_budget.lookups,
+            package_budget.skipped,
+        )
     return result

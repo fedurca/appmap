@@ -16,6 +16,14 @@ import sys
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
 
+# CODE-023: the single source of truth for on-disk permissions of anything
+# holding capture data (database, WAL/SHM sidecars, snapshots, state files,
+# their parent directories). store.py, aggregate.py and elevate_linux.py each
+# used to carry their own literal, and store.DB_FILE_MODE was declared but
+# never actually applied. Import these instead of writing 0o640 again.
+DATA_FILE_MODE = 0o640
+DATA_DIR_MODE = 0o750
+
 
 # Linux capability bit numbers (uapi/linux/capability.h).
 _CAP_DAC_READ_SEARCH = 2
@@ -78,7 +86,7 @@ def secure_permissions(path: str, is_dir: bool = False) -> None:
             pass
         return
     try:
-        os.chmod(path, 0o750 if is_dir else 0o640)
+        os.chmod(path, DATA_DIR_MODE if is_dir else DATA_FILE_MODE)
     except OSError:
         pass
 

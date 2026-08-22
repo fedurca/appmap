@@ -17,13 +17,17 @@ ship with the agent.
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import platform
 import shutil
 import socket
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+log = logging.getLogger("commatrix.zabbix")
 
 # Zabbix agent item keys queried for host parameters (best effort).
 DEFAULT_AGENT_KEYS = [
@@ -36,6 +40,15 @@ DEFAULT_AGENT_KEYS = [
     "vm.memory.size[total]",
     "system.uptime",
 ]
+
+# CODE-014: collect_host_params() used to issue one zabbix_get per key, each
+# with its own 5 s timeout, strictly serially. With the agent installed but
+# unresponsive (firewalled, restarting, overloaded) the refresh cycle blocked
+# for 8 x 5 = 40 s every single time. Now the whole batch shares a deadline
+# and gives up early once the agent has clearly stopped answering.
+AGENT_QUERY_TIMEOUT = 2.0
+AGENT_QUERY_BUDGET = 6.0
+AGENT_QUERY_MAX_FAILURES = 2
 
 
 @dataclass
@@ -132,7 +145,12 @@ def zabbix_get_available(binary: str = "zabbix_get") -> bool:
     return shutil.which(binary) is not None
 
 
-def query_agent_key(key: str, binary: str = "zabbix_get", host: str = "127.0.0.1") -> Optional[str]:
+def query_agent_key(
+    key: str,
+    binary: str = "zabbix_get",
+    host: str = "127.0.0.1",
+    timeout: float = AGENT_QUERY_TIMEOUT,
+) -> Optional[str]:
     if not zabbix_get_available(binary):
         return None
     try:
@@ -140,7 +158,7 @@ def query_agent_key(key: str, binary: str = "zabbix_get", host: str = "127.0.0.1
             [binary, "-s", host, "-k", key],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -236,11 +254,32 @@ def collect_host_params(
 
     queried_any = False
     if zabbix_get_available(zabbix_get_bin):
+        # CODE-014: bounded, fail-fast batch instead of 8 unbounded serial calls.
+        deadline = time.monotonic() + AGENT_QUERY_BUDGET
+        consecutive_failures = 0
         for key in keys or DEFAULT_AGENT_KEYS:
-            value = query_agent_key(key, binary=zabbix_get_bin)
+            if time.monotonic() >= deadline:
+                log.debug("zabbix_get budget exhausted; skipping remaining keys")
+                break
+            if consecutive_failures >= AGENT_QUERY_MAX_FAILURES:
+                log.debug(
+                    "zabbix_get failed %d times in a row; assuming the agent is "
+                    "unreachable and skipping remaining keys",
+                    consecutive_failures,
+                )
+                break
+            remaining = max(0.1, deadline - time.monotonic())
+            value = query_agent_key(
+                key,
+                binary=zabbix_get_bin,
+                timeout=min(AGENT_QUERY_TIMEOUT, remaining),
+            )
             if value is not None:
                 params[key] = value
                 queried_any = True
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
 
     # Always merge fallback values for keys the agent did not answer.
     for k, v in _fallback_params().items():
@@ -248,6 +287,25 @@ def collect_host_params(
 
     params["source"] = "zabbix_agent" if queried_any else "fallback"
     return params
+
+
+def _sender_quote(value: object) -> str:
+    """Quote one field of a ``zabbix_sender -i`` line (SEC-015).
+
+    The batch format is whitespace-separated, double-quoted fields with
+    backslash escaping. Interpolating a value straight into ``"..."`` lets any
+    value containing a quote close the field and append arbitrary extra fields
+    -- and a newline lets it append whole extra items for *other* hosts. Peer
+    domains and process command lines reach this function, and both are
+    attacker-influenced.
+    """
+
+    text = "" if value is None else str(value)
+    # Control characters (newline above all) have no representation in the
+    # line-oriented batch format; drop them rather than emit a broken record.
+    text = "".join(ch for ch in text if ch >= " " and ch != "\x7f")
+    text = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
 
 
 def send_via_sender(
@@ -265,7 +323,10 @@ def send_via_sender(
 
     if not shutil.which(binary):
         return False
-    payload_lines = [f'"{host}" "{key}" "{value}"' for key, value in items.items()]
+    payload_lines = [
+        f"{_sender_quote(host)} {_sender_quote(key)} {_sender_quote(value)}"
+        for key, value in items.items()
+    ]
     payload = "\n".join(payload_lines) + "\n"
     try:
         out = subprocess.run(

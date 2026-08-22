@@ -13,6 +13,7 @@ import logging
 import os
 from typing import Iterable, List
 
+from .platform import DATA_DIR_MODE, DATA_FILE_MODE
 from .store import Store
 
 log = logging.getLogger("commatrix.aggregate")
@@ -29,13 +30,13 @@ def export_snapshot(db_path: str, out_path: str, host: str = None) -> str:  # ty
 
     directory = os.path.dirname(os.path.abspath(out_path))
     if directory and not os.path.isdir(directory):
-        os.makedirs(directory, mode=0o750, exist_ok=True)
+        os.makedirs(directory, mode=DATA_DIR_MODE, exist_ok=True)
     # Snapshots contain the full topology; do not expose them world-readable.
-    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, DATA_FILE_MODE)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, sort_keys=True)
     try:
-        os.chmod(out_path, 0o640)
+        os.chmod(out_path, DATA_FILE_MODE)
     except OSError:
         pass
     return out_path

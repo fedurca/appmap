@@ -22,9 +22,20 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
+from . import platform as _plat
+
 log = logging.getLogger("commatrix.store")
 
 SCHEMA_VERSION = 4
+
+# CODE-016: a full VACUUM rewrites the entire database into a temporary file in
+# the same directory, so it needs roughly as much free space again as the
+# database occupies. Running one after *every* prune batch -- which is exactly
+# what prune_to_budget() used to do, up to 20 times per cycle -- is the worst
+# possible behaviour on the one machine state that triggers it: a full disk.
+# The batch loop now reclaims incrementally (cheap, in-place, no temp file) and
+# a full VACUUM runs at most once, and only when the free space is there.
+VACUUM_FREE_SPACE_FACTOR = 1.2
 
 # The columns that make up the flows UNIQUE key. A snapshot row missing any of
 # them cannot be merged meaningfully.
@@ -34,8 +45,12 @@ _FLOW_KEY_COLUMNS = (
 
 # Restrictive permissions: the database is a full internal network map and must
 # not be world-readable.
-DB_FILE_MODE = 0o640
-DB_DIR_MODE = 0o750
+# CODE-023: these are re-exports of the single source of truth in
+# commatrix.platform, kept under their historical names so existing imports
+# keep working. DB_FILE_MODE used to be dead code -- it is now what
+# secure_permissions() actually applies.
+DB_FILE_MODE = _plat.DATA_FILE_MODE
+DB_DIR_MODE = _plat.DATA_DIR_MODE
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -174,12 +189,17 @@ class EdgeObservation:
     netns: Optional[str] = None
 
 
+class SchemaVersionError(RuntimeError):
+    """Raised when the on-disk schema is newer than this build understands."""
+
+
 class Store:
     def __init__(
         self,
         path: str,
         read_only: bool = False,
         event_min_gap: float = 60.0,
+        allow_schema_mismatch: bool = False,
     ):
         # When set, record_edge() skips its own commit so a whole poll lands in
         # a single transaction (see record_edges). One fsync per edge made a
@@ -197,6 +217,7 @@ class Store:
             # another user as long as it is group/other readable).
             self.conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             self.conn.row_factory = sqlite3.Row
+            self._check_schema_version(allow_schema_mismatch)
             return
 
         directory = os.path.dirname(os.path.abspath(path))
@@ -219,8 +240,16 @@ class Store:
             if old_umask is not None:
                 os.umask(old_umask)
         self.conn.row_factory = sqlite3.Row
+        if not db_existed:
+            # CODE-016: only settable on an empty database, and it has to be
+            # set before anything writes the file header -- journal_mode=WAL
+            # included. With INCREMENTAL, freed pages go on a freelist that
+            # `PRAGMA incremental_vacuum` can hand back to the filesystem in
+            # bounded chunks, with no whole-file rewrite and no temp copy.
+            self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL;")
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA busy_timeout=5000;")
+        self._check_schema_version(allow_schema_mismatch)
         self.init_schema()
         # Tighten permissions on files/dirs we create (best-effort).
         self._restrict_permissions(path, directory, created_dir, db_existed)
@@ -242,11 +271,55 @@ class Store:
         if self.read_only:
             raise RuntimeError("Store opened read-only; writes are not permitted")
 
+    def stored_schema_version(self) -> Optional[int]:
+        """The schema_version recorded in ``meta``, or None if not recorded."""
+
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()
+        except sqlite3.Error:
+            # meta table does not exist yet -> brand new database.
+            return None
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    def _check_schema_version(self, allow_mismatch: bool) -> None:
+        """Refuse to open a database written by a newer build.
+
+        The old code only ever ran ``INSERT OR IGNORE`` on schema_version, so a
+        database created at v1 still claimed v1 forever, and -- worse -- an
+        older binary would happily open a v5 database, silently ignore the
+        columns it did not know about and write partial rows back.
+        """
+
+        found = self.stored_schema_version()
+        if found is None or found <= SCHEMA_VERSION:
+            return
+        message = (
+            f"database {self.path!r} was written by a newer Commatrix "
+            f"(schema v{found}, this build understands v{SCHEMA_VERSION}). "
+            "Upgrade Commatrix, or pass allow_schema_mismatch=True to read it "
+            "anyway (data written by the newer version may be lost)."
+        )
+        if not allow_mismatch:
+            raise SchemaVersionError(message)
+        log.warning("%s", message)
+
     def init_schema(self) -> None:
         self.conn.executescript(_SCHEMA)
         self._migrate()
+        # Record (or advance) the schema version. INSERT OR IGNORE alone left
+        # every pre-existing database permanently pinned to whatever version it
+        # was created at, which made the stored value useless as a guard.
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+            "WHERE CAST(meta.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
             (str(SCHEMA_VERSION),),
         )
         self.conn.commit()
@@ -788,24 +861,79 @@ class Store:
         self.conn.commit()
         return cur.rowcount
 
-    def _checkpoint_and_vacuum(self) -> None:
+    def _checkpoint(self) -> None:
+        """Fold the WAL back into the main database file (cheap, in-place)."""
+
         try:
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            self.conn.execute("VACUUM;")
             self.conn.commit()
         except sqlite3.OperationalError:
             pass
 
+    def _incremental_reclaim(self, max_pages: int = 4096) -> None:
+        """Hand a bounded number of freed pages back to the filesystem.
+
+        No temporary file, no whole-database rewrite -- the two properties that
+        made a full VACUUM the wrong tool inside the prune loop (CODE-016).
+        """
+
+        try:
+            self.conn.execute(f"PRAGMA incremental_vacuum({int(max_pages)});")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def _free_space_bytes(self) -> Optional[int]:
+        try:
+            st = os.statvfs(os.path.dirname(os.path.abspath(self.path)) or ".")
+        except (OSError, AttributeError):
+            return None
+        return st.f_bavail * st.f_frsize
+
+    def _full_vacuum(self) -> bool:
+        """Run a full VACUUM, but only if there is room for the rebuild.
+
+        Returns True if the VACUUM ran. A VACUUM needs about as much free space
+        again as the database occupies; attempting one on the almost-full disk
+        that triggered pruning in the first place is how you turn a disk
+        pressure warning into a hard failure.
+        """
+
+        db_bytes = self.db_size_bytes()
+        free = self._free_space_bytes()
+        if free is not None and free < db_bytes * VACUUM_FREE_SPACE_FACTOR:
+            log.info(
+                "skipping VACUUM: %d B free is below the %.1fx of the %d B "
+                "database that the rebuild needs",
+                free, VACUUM_FREE_SPACE_FACTOR, db_bytes,
+            )
+            return False
+        try:
+            self.conn.execute("VACUUM;")
+            self.conn.commit()
+        except sqlite3.OperationalError as exc:
+            log.warning("VACUUM failed: %s", exc)
+            return False
+        return True
+
+    def _checkpoint_and_vacuum(self) -> None:
+        """Backwards-compatible full reclaim (checkpoint + guarded VACUUM)."""
+
+        self._checkpoint()
+        self._full_vacuum()
+
     def prune_to_budget(self, max_bytes: int, batch_fraction: float = 0.1) -> int:
         """Delete the least-recently-active edges until the DB fits *max_bytes*.
 
-        Returns the number of rows deleted.  Runs a bounded number of passes to
-        avoid spinning; each pass drops roughly ``batch_fraction`` of rows and
-        VACUUMs to reclaim space.
+        Returns the number of rows deleted. Runs a bounded number of passes to
+        avoid spinning. CODE-016: each pass reclaims incrementally instead of
+        running a full VACUUM, and a single guarded VACUUM is attempted at the
+        end only if the incremental reclaim did not get us under budget.
         """
 
         deleted = 0
-        self._checkpoint_and_vacuum()
+        self._checkpoint()
+        self._incremental_reclaim()
         for _ in range(20):
             if self.db_size_bytes() <= max_bytes:
                 break
@@ -836,7 +964,13 @@ class Store:
             )
             deleted += cur.rowcount
             self.conn.commit()
-            self._checkpoint_and_vacuum()
+            self._checkpoint()
+            self._incremental_reclaim()
+        if deleted and self.db_size_bytes() > max_bytes:
+            # Last resort: a database created before auto_vacuum=INCREMENTAL
+            # was set has no freelist to reclaim from, so only a rewrite will
+            # shrink it. _full_vacuum() declines when the disk cannot take it.
+            self._full_vacuum()
         return deleted
 
 
