@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from .dns import IpNameCache
+
 log = logging.getLogger("commatrix.sni")
 
 _ETH_P_ALL = 0x0003
@@ -184,7 +186,7 @@ class SniMonitor(threading.Thread):
         self.max_buffer = max_buffer
         self._lock = threading.Lock()
         self._events: List[SniEvent] = []
-        self._ip_names: Dict[str, Tuple[str, float]] = {}
+        self._ip_names = IpNameCache()
         self._stop = threading.Event()
         self._sock: Optional[socket.socket] = None
         self.failed = False
@@ -198,9 +200,9 @@ class SniMonitor(threading.Thread):
     def lookup(self, ip: str, now: Optional[float] = None) -> Optional[str]:
         now = now or time.time()
         with self._lock:
-            hit = self._ip_names.get(ip)
-        if hit and hit[0] != "<ech>" and (now - hit[1]) <= _MAP_TTL:
-            return hit[0]
+            name = self._ip_names.get(ip, now)
+        if name is not None and name != "<ech>":
+            return name
         return None
 
     def stop(self) -> None:
@@ -215,10 +217,8 @@ class SniMonitor(threading.Thread):
         with self._lock:
             if len(self._events) < self.max_buffer:
                 self._events.append(ev)
-            self._ip_names[ev.dst_ip] = (ev.sni, ev.ts)
-            if len(self._ip_names) > 20000:
-                cutoff = time.time() - _MAP_TTL
-                self._ip_names = {k: v for k, v in self._ip_names.items() if v[1] >= cutoff}
+            # SEC-009/SEC-027: hard-bounded LRU, not TTL-only pruning.
+            self._ip_names.put(ev.dst_ip, ev.sni, ev.ts)
 
     def run(self) -> None:
         try:
@@ -246,7 +246,10 @@ class SniMonitor(threading.Thread):
                     continue
                 try:
                     ev = _parse_frame(frame, self.ports)
-                except (struct.error, IndexError, OSError):
+                except (struct.error, IndexError, OSError, ValueError):
+                    ev = None
+                except Exception as exc:  # noqa: BLE001 - never kill the thread
+                    log.warning("SNI parse failed: %s", exc, exc_info=True)
                     ev = None
                 if ev is not None:
                     self._record(ev)

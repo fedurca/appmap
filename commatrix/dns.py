@@ -28,6 +28,7 @@ import logging
 import socket
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -42,6 +43,14 @@ _QTYPES = {1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR", 15: "MX",
 
 # How long a resolved name is kept usable for enriching flows.
 _MAP_TTL = 900.0
+
+# SEC-009 / SEC-027: the IP -> name maps used to be plain dicts pruned only by
+# TTL once they passed 20000 entries. TTL-only pruning is not a bound: a peer
+# that generates 20001 distinct destination addresses inside the 15 minute
+# window prunes nothing and the map keeps growing for as long as the process
+# lives. Every one of these maps now goes through IpNameCache, which is a real
+# LRU with a hard ceiling *and* a TTL.
+IP_NAME_CACHE_MAX = 20000
 
 # SEC-012: the varlink framing is NUL-terminated JSON with no declared length,
 # so a peer that never sends a NUL would grow the receive buffer without limit.
@@ -59,6 +68,54 @@ _RECONNECT_BACKOFF_MAX = 60.0
 # RecursionError, which is not an Exception subclass path anyone expects and
 # used to kill the monitor thread outright.
 _JSON_MAX_DEPTH = 100
+
+
+class IpNameCache:
+    """Bounded, TTL-expiring map of peer IP -> resolved name.
+
+    Not thread-safe on its own: callers hold their own lock (the monitors all
+    mutate this from the capture thread and read it from the collector thread).
+    """
+
+    def __init__(self, max_entries: int = IP_NAME_CACHE_MAX, ttl: float = _MAP_TTL):
+        self.max_entries = max_entries
+        self.ttl = ttl
+        self._data: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, ip: object) -> bool:
+        return ip in self._data
+
+    def put(self, ip: str, name: str, ts: float) -> None:
+        self._data[ip] = (name, ts)
+        self._data.move_to_end(ip)
+        # Drop entries that aged out first, then enforce the hard ceiling by
+        # evicting least-recently-used entries -- which is what makes this a
+        # bound rather than a hope.
+        cutoff = ts - self.ttl
+        while self._data:
+            oldest_ip, (_name, stamp) = next(iter(self._data.items()))
+            if stamp >= cutoff:
+                break
+            del self._data[oldest_ip]
+        while len(self._data) > self.max_entries:
+            self._data.popitem(last=False)
+
+    def get(self, ip: str, now: Optional[float] = None) -> Optional[str]:
+        hit = self._data.get(ip)
+        if hit is None:
+            return None
+        name, stamp = hit
+        if (now or time.time()) - stamp > self.ttl:
+            del self._data[ip]
+            return None
+        self._data.move_to_end(ip)
+        return name
+
+    def clear(self) -> None:
+        self._data.clear()
 
 
 @dataclass
@@ -202,7 +259,7 @@ class DnsMonitor(threading.Thread):
         self.max_buffer = max_buffer
         self._lock = threading.Lock()
         self._events: List[DnsEvent] = []
-        self._ip_names: Dict[str, Tuple[str, float]] = {}
+        self._ip_names = IpNameCache()
         self._stop = threading.Event()
         self._sock: Optional[socket.socket] = None
         self._backoff = _RECONNECT_BACKOFF_MIN
@@ -223,10 +280,7 @@ class DnsMonitor(threading.Thread):
     def lookup(self, ip: str, now: Optional[float] = None) -> Optional[str]:
         now = now or time.time()
         with self._lock:
-            hit = self._ip_names.get(ip)
-        if hit and (now - hit[1]) <= _MAP_TTL:
-            return hit[0]
-        return None
+            return self._ip_names.get(ip, now)
 
     def stop(self) -> None:
         self._stop.set()
@@ -242,13 +296,7 @@ class DnsMonitor(threading.Thread):
             if len(self._events) < self.max_buffer:
                 self._events.append(ev)
             for ip in ev.answers:
-                self._ip_names[ip] = (ev.qname or "", ev.ts)
-            # Bound the map.
-            if len(self._ip_names) > 20000:
-                cutoff = time.time() - _MAP_TTL
-                self._ip_names = {
-                    k: v for k, v in self._ip_names.items() if v[1] >= cutoff
-                }
+                self._ip_names.put(ip, ev.qname or "", ev.ts)
 
     def run(self) -> None:
         # CODE-013: every exit from _run_once() -- error *or* clean EOF -- has

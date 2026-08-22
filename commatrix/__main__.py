@@ -400,6 +400,8 @@ def cmd_history(args: argparse.Namespace) -> int:
     if args.format == "jsonl":
         text = "".join(json.dumps(r, default=str) + "\n" for r in rows)
     else:  # markdown
+        # SEC-021: every interpolated field below is attacker-influenced.
+        from .report import _md_cell
         header = "| Time | Host | Kind | Dir | Service | Port | L7 | Peer | Class | Process | Idle gap |"
         sep = "|---|---|---|---|---|---|---|---|---|---|---|"
         lines = [header, sep]
@@ -408,16 +410,16 @@ def cmd_history(args: argparse.Namespace) -> int:
             lines.append(
                 "| {ts} | {host} | {kind} | {direction} | {service_name} | {service_port} | "
                 "{l7_protocol} | {peer_ip} | {peer_class} | {process_comm} | {idle:.0f}s |".format(
-                    ts=ts,
-                    host=r.get("host", ""),
-                    kind=r.get("kind", ""),
-                    direction=r.get("direction", "") or "",
-                    service_name=r.get("service_name", "") or "",
-                    service_port=r.get("service_port", "") or "",
-                    l7_protocol=r.get("l7_protocol", "") or "",
-                    peer_ip=r.get("peer_ip", "") or "",
-                    peer_class=r.get("peer_class", "") or "",
-                    process_comm=r.get("process_comm", "") or "",
+                    ts=_md_cell(ts),
+                    host=_md_cell(r.get("host", "")),
+                    kind=_md_cell(r.get("kind", "")),
+                    direction=_md_cell(r.get("direction", "") or ""),
+                    service_name=_md_cell(r.get("service_name", "") or ""),
+                    service_port=_md_cell(r.get("service_port", "") or ""),
+                    l7_protocol=_md_cell(r.get("l7_protocol", "") or ""),
+                    peer_ip=_md_cell(r.get("peer_ip", "") or ""),
+                    peer_class=_md_cell(r.get("peer_class", "") or ""),
+                    process_comm=_md_cell(r.get("process_comm", "") or ""),
                     idle=float(r.get("idle_gap") or 0),
                 )
             )
@@ -447,13 +449,17 @@ def cmd_dns(args: argparse.Namespace) -> int:
     if args.format == "jsonl":
         text = "".join(json.dumps(r, default=str) + "\n" for r in rows)
     else:
+        # SEC-021: qname and answers come straight off the wire.
+        from .report import _md_cell
         lines = ["| Time | Host | Query | Type | Rcode | Answers |",
                  "|---|---|---|---|---|---|"]
         for r in rows:
             ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(r.get("ts") or 0))
             lines.append(
-                f"| {ts} | {r.get('host','')} | {r.get('qname') or ''} | "
-                f"{r.get('qtype') or ''} | {r.get('rcode') or ''} | {r.get('answers') or ''} |"
+                f"| {_md_cell(ts)} | {_md_cell(r.get('host',''))} | "
+                f"{_md_cell(r.get('qname') or '')} | "
+                f"{_md_cell(r.get('qtype') or '')} | {_md_cell(r.get('rcode') or '')} | "
+                f"{_md_cell(r.get('answers') or '')} |"
             )
         text = "\n".join(lines) + "\n"
     _write_output(text, args.output)

@@ -113,6 +113,38 @@ def matrix_csv(store: Store, host: Optional[str] = None) -> str:
     return buf.getvalue()
 
 
+# -- markdown neutralisation (SEC-021) -----------------------------------
+# Markdown emitters interpolate peer_name (reverse DNS PTR), peer_domain (SNI
+# ClientHello), process_comm/exe and anything that arrived via /ingest -- all
+# attacker-influenced. Markdown is a *superset* of HTML: most renderers pass
+# raw tags straight through, so an unescaped "<img src=x onerror=...>" in a PTR
+# record becomes script execution the moment the report is rendered in a wiki,
+# a ticket or a static site. A bare "|" or newline also silently rewrites the
+# surrounding table.
+MAX_MD_FIELD_LEN = 200
+
+
+def _md_text(value: object) -> str:
+    """Neutralise free-standing markdown text (headings, list items)."""
+
+    text = "" if value is None else str(value)
+    text = text[:MAX_MD_FIELD_LEN]
+    # Drop control characters, including the newlines that would end the block.
+    text = "".join(ch if ch >= " " or ch == "\t" else " " for ch in text)
+    text = text.replace("\t", " ")
+    # HTML neutralisation: the renderer must never see a tag or an entity we
+    # did not put there.
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return text
+
+
+def _md_cell(value: object) -> str:
+    """Neutralise a value destined for a markdown *table* cell."""
+
+    # The pipe is the column separator; escaping it keeps the row intact.
+    return _md_text(value).replace("|", "\\|")
+
+
 def matrix_markdown(store: Store, host: Optional[str] = None) -> str:
     rows = _rows(store, host)
     lines = ["# Communication matrix", ""]
@@ -128,20 +160,20 @@ def matrix_markdown(store: Store, host: Optional[str] = None) -> str:
             "| "
             + " | ".join(
                 [
-                    str(r.get("host", "")),
-                    str(r.get("direction", "")),
-                    str(r.get("service_name", "")),
-                    str(r.get("service_port", "")),
-                    str(r.get("l7_protocol") or ""),
-                    str(peer or ""),
-                    str(r.get("peer_domain") or ""),
-                    str(r.get("peer_class") or ""),
-                    human_bytes(r.get("bytes")),
-                    fmt_time(r.get("first_seen")),
-                    fmt_time(r.get("last_seen")),
-                    fmt_duration(r.get("max_gap")),
-                    str(r.get("observations") or 0),
-                    str(r.get("process_comm") or ""),
+                    _md_cell(r.get("host", "")),
+                    _md_cell(r.get("direction", "")),
+                    _md_cell(r.get("service_name", "")),
+                    _md_cell(r.get("service_port", "")),
+                    _md_cell(r.get("l7_protocol") or ""),
+                    _md_cell(peer or ""),
+                    _md_cell(r.get("peer_domain") or ""),
+                    _md_cell(r.get("peer_class") or ""),
+                    _md_cell(human_bytes(r.get("bytes"))),
+                    _md_cell(fmt_time(r.get("first_seen"))),
+                    _md_cell(fmt_time(r.get("last_seen"))),
+                    _md_cell(fmt_duration(r.get("max_gap"))),
+                    _md_cell(r.get("observations") or 0),
+                    _md_cell(r.get("process_comm") or ""),
                 ]
             )
             + " |"
@@ -904,12 +936,12 @@ def service_sheets(store: Store, host: Optional[str] = None) -> str:
     for host_entry in sorted(catalog["hosts"], key=lambda h: str(h["host"])):  # type: ignore[index,arg-type]
         host = host_entry["host"]  # type: ignore[index]
         params = host_entry.get("params", {})  # type: ignore[union-attr]
-        lines.append(f"## Host: {host}")
+        lines.append(f"## Host: {_md_text(host)}")
         uname = params.get("system.uname") or params.get("os.system")
         if uname:
-            lines.append(f"- System: {uname}")
+            lines.append(f"- System: {_md_text(uname)}")
         if params.get("host_metadata"):
-            lines.append(f"- Zabbix metadata: {params.get('host_metadata')}")
+            lines.append(f"- Zabbix metadata: {_md_text(params.get('host_metadata'))}")
         lines.append("")
 
         apps = host_entry.get("applications", {})  # type: ignore[union-attr]
@@ -918,19 +950,22 @@ def service_sheets(store: Store, host: Optional[str] = None) -> str:
             continue
         for app_name in sorted(apps):  # type: ignore[union-attr]
             app = apps[app_name]  # type: ignore[index]
-            lines.append(f"### {app_name}")
+            lines.append(f"### {_md_text(app_name)}")
             l7 = ", ".join(app.get("l7_protocols") or []) or "-"  # type: ignore[union-attr]
-            lines.append(f"- Layer-7: {l7}")
+            lines.append(f"- Layer-7: {_md_text(l7)}")
             listens = app.get("listens") or []  # type: ignore[union-attr]
             if listens:
-                ports = ", ".join(f"{l['proto']}/{l['port']}" for l in listens)
+                ports = ", ".join(
+                    f"{_md_text(l['proto'])}/{_md_text(l['port'])}" for l in listens
+                )
                 lines.append(f"- Listens on: {ports}")
             callers = app.get("callers") or []  # type: ignore[union-attr]
             if callers:
                 lines.append("- Called by:")
                 for c in _dedupe_peers(callers):
                     lines.append(
-                        f"    - {c['peer']} ({c['peer_class']}), {human_bytes(c['bytes'])}, "
+                        f"    - {_md_text(c['peer'])} ({_md_text(c['peer_class'])}), "
+                        f"{human_bytes(c['bytes'])}, "
                         f"last {fmt_time(c['last_seen'])}, max gap {fmt_duration(c['max_gap'])}"
                     )
             deps = app.get("depends_on") or []  # type: ignore[union-attr]
@@ -939,7 +974,8 @@ def service_sheets(store: Store, host: Optional[str] = None) -> str:
                 for d in _dedupe_peers(deps):
                     svc = d.get("service") or d.get("port")
                     lines.append(
-                        f"    - {d['peer']}:{d.get('port')} ({svc}, {d['peer_class']}), "
+                        f"    - {_md_text(d['peer'])}:{_md_text(d.get('port'))} "
+                        f"({_md_text(svc)}, {_md_text(d['peer_class'])}), "
                         f"{human_bytes(d['bytes'])}, last {fmt_time(d['last_seen'])}"
                     )
             lines.append("")
@@ -1009,7 +1045,7 @@ def security_highlights(
 
 def security_markdown(store: Store, host: Optional[str] = None) -> str:
     data = security_highlights(store, host)
-    scope = f" (host={host})" if host else ""
+    scope = f" (host={_md_text(host)})" if host else ""
     lines = [f"# Security highlights{scope}", ""]
 
     def section(title: str, items: List[Dict[str, object]], desc: str) -> None:
@@ -1019,8 +1055,9 @@ def security_markdown(store: Store, host: Optional[str] = None) -> str:
             lines.append("- None observed.")
         for it in items:
             lines.append(
-                f"- {it['host']} {it['service']}:{it['port']} <-> {it['peer']} "
-                f"[{it.get('l7') or '-'}]"
+                f"- {_md_text(it['host'])} {_md_text(it['service'])}:"
+                f"{_md_text(it['port'])} -> {_md_text(it['peer'])} "
+                f"[{_md_text(it.get('l7') or '-')}]"
             )
         lines.append("")
 

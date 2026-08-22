@@ -42,6 +42,13 @@ class ElevateWindowsApplyRevokeTest(unittest.TestCase):
             if cmd0 == "net" and args[1] == "localgroup":
                 return mock.Mock(returncode=0, stdout="", stderr="")
             if cmd0 == "where":
+                target = args[1] if len(args) > 1 else ""
+                if target in ("powershell.exe", "pwsh.exe"):
+                    return mock.Mock(
+                        returncode=0,
+                        stdout="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\n",
+                        stderr="",
+                    )
                 return mock.Mock(returncode=1, stdout="", stderr="")
             if cmd0 == "wevtutil":
                 return mock.Mock(returncode=0, stdout="", stderr="")
@@ -58,8 +65,15 @@ class ElevateWindowsApplyRevokeTest(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
             return mock.Mock(returncode=0, stdout="", stderr="")
 
+        self.stdin_calls = []
+
+        def fake_run_stdin(args, stdin_text, **kwargs):
+            self.stdin_calls.append((list(args), stdin_text))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
         self.patches = [
             mock.patch.object(ew, "_run", side_effect=fake_run),
+            mock.patch.object(ew, "_run_stdin", side_effect=fake_run_stdin),
             mock.patch("commatrix.platform.win.runtime.is_admin", return_value=True),
             mock.patch.object(ew, "default_data_dir", return_value=self.tmp.name),
         ]
@@ -78,14 +92,40 @@ class ElevateWindowsApplyRevokeTest(unittest.TestCase):
         # Password must not be persisted.
         self.assertNotIn("password", state)
         schtasks_creates = [
-            c for c in self.calls
-            if c and c[0] == "schtasks" and "/create" in c and "commatrix" in c
+            c for c in self.calls if c and c[0] == "schtasks" and "/create" in c
         ]
         self.assertTrue(schtasks_creates)
-        self.assertIn("/ru", schtasks_creates[0])
-        self.assertIn("commatrix", schtasks_creates[0])
-        self.assertIn("/rl", schtasks_creates[0])
-        self.assertIn("limited", schtasks_creates[0])
+        # SEC-023: the task is registered from an S4U XML definition, so no
+        # password is handed to schtasks at all.
+        self.assertIn("/xml", schtasks_creates[0])
+        self.assertNotIn("/rp", schtasks_creates[0])
+
+    def test_no_password_reaches_any_command_line(self):
+        """SEC-023 regression: nothing secret may appear in argv."""
+
+        ew.apply_elevate(state_file=self.state, dry_run=False)
+        for call in self.calls:
+            self.assertNotIn(
+                "/rp", call,
+                f"password passed on the command line: {call}",
+            )
+            if call and call[0] == "net" and len(call) > 2 and call[1] == "user":
+                # 'net user <name>' probe is fine; 'net user <name> <secret>'
+                # is exactly what SEC-023 is about.
+                self.assertLessEqual(
+                    len(call), 3,
+                    f"password passed on the command line: {call}",
+                )
+        # The secret went through stdin instead.
+        self.assertTrue(
+            any("ConvertTo-SecureString" in text for _args, text in self.stdin_calls),
+            "expected the password to be set through a PowerShell script on stdin",
+        )
+
+    def test_falls_back_to_net_user_with_a_warning_when_powershell_is_missing(self):
+        with mock.patch.object(ew, "_powershell", return_value=None):
+            result = ew.apply_elevate(state_file=self.state, dry_run=False)
+        self.assertTrue(any("SEC-023" in w for w in result.warnings))
 
     def test_revoke_restores_system_task(self):
         with open(self.state, "w", encoding="utf-8") as fh:

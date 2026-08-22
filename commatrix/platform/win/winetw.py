@@ -40,25 +40,26 @@ class XmlSecurityError(ValueError):
     """Raised when the event XML contains a DTD or entity declaration."""
 
 
-def _safe_parser() -> ElementTree.XMLParser:
-    parser = ElementTree.XMLParser()
+# A DOCTYPE or ENTITY declaration is markup: inside element text or an
+# attribute value a literal "<" must be written "&lt;", so these substrings
+# cannot occur in a query name or any other data field. Matching them as plain
+# text is therefore exact, and unlike a parser hook it does not depend on
+# xml.etree exposing its expat instance -- which it stopped doing in 3.9.
+_FORBIDDEN_MARKUP = ("<!doctype", "<!entity", "<!notation")
 
-    def _reject_doctype(name, sysid, pubid, has_internal_subset):
-        raise XmlSecurityError(f"DOCTYPE declaration rejected: {name!r}")
 
-    def _reject_entity(*args, **kwargs):
-        raise XmlSecurityError("entity declaration rejected")
+def _reject_dtd(xml_text: str) -> None:
+    """Raise XmlSecurityError if *xml_text* declares a DTD or entities.
 
-    expat = getattr(parser, "parser", None)
-    if expat is not None:
-        expat.StartDoctypeDeclHandler = _reject_doctype
-        expat.EntityDeclHandler = _reject_entity
-        # Belt and braces: refuse to load anything from outside the document.
-        try:
-            expat.ExternalEntityRefHandler = lambda *a: False
-        except AttributeError:
-            pass
-    return parser
+    SEC-028: xml.etree expands internally declared entities, which is the
+    entire mechanism behind a billion-laughs bomb. wevtutil never emits a DTD,
+    so refusing one outright costs nothing and closes the class of attack.
+    """
+
+    lowered = xml_text.lower()
+    for marker in _FORBIDDEN_MARKUP:
+        if marker in lowered:
+            raise XmlSecurityError(f"{marker} declaration rejected")
 
 
 def _addrs_from_results(results: str) -> List[str]:
@@ -102,9 +103,8 @@ def parse_dns_events_with_ids(xml_text: str) -> List[Tuple[Optional[int], DnsEve
         return events
     # wevtutil emits a sequence of <Event>...</Event> without a root; wrap it.
     try:
-        root = ElementTree.fromstring(
-            "<Events>" + xml_text + "</Events>", parser=_safe_parser()
-        )
+        _reject_dtd(xml_text)
+        root = ElementTree.fromstring("<Events>" + xml_text + "</Events>")
     except (ElementTree.ParseError, XmlSecurityError) as exc:
         log.debug("dns event XML rejected: %s", exc)
         return events
