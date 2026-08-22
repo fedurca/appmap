@@ -36,9 +36,22 @@ def get() -> str:
 
 
 def _sub_file(path: str, pattern: re.Pattern, version: str) -> None:
+    """Rewrite the single version literal in *path*.
+
+    CODE-033: re.sub() returns the input unchanged when nothing matched, so a
+    renamed field or a reformatted line silently produced a release stamped
+    with the previous version - and the failure surfaced later, as a package
+    whose metadata disagreed with its tag. Verify the substitution happened.
+    """
+
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    new = pattern.sub(lambda mm: f'{mm.group(1)}"{version}"', text, count=1)
+    new, count = pattern.subn(lambda mm: f'{mm.group(1)}"{version}"', text, count=1)
+    if count != 1:
+        raise SystemExit(
+            f"version pattern {pattern.pattern!r} did not match in {path}; "
+            "refusing to write a release stamped with the old version"
+        )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(new)
 

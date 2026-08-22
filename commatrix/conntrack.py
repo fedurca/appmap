@@ -661,4 +661,12 @@ def iter_conntrack_events(
 
 
 def is_root() -> bool:
+    # CODE-009: os.geteuid() does not exist on Windows, so this raised
+    # AttributeError instead of answering the question. The Windows paths that
+    # reach here (netns scope checks, capture-backend selection) want a plain
+    # "are we privileged", and the platform layer already knows how to answer
+    # that on both systems.
+    if not hasattr(os, "geteuid"):
+        from . import platform as _plat
+        return _plat.is_privileged()
     return os.geteuid() == 0

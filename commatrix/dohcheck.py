@@ -184,8 +184,11 @@ def host_params() -> Dict[str, object]:
     }
 
 
-def markdown() -> str:
-    posture = doh_posture()
+def markdown(posture: Optional[Dict[str, object]] = None) -> str:
+    """Render the DoH posture. Pass *posture* to reuse an existing probe."""
+
+    if posture is None:
+        posture = doh_posture()
     lines = ["# DNS-over-HTTPS (DoH) posture", ""]
     lines.append(f"**Assessment:** {posture['assessment']}")
     lines.append("")

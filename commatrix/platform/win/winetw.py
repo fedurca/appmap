@@ -18,6 +18,8 @@ from xml.etree import ElementTree
 
 from ...dns import DnsEvent, _MAP_TTL
 
+from ...threadguard import DrainCounters, drain_iteration
+
 log = logging.getLogger("commatrix.win.winetw")
 
 _CHANNEL = "Microsoft-Windows-DNS-Client/Operational"
@@ -166,6 +168,7 @@ class WinDnsMonitor(threading.Thread):
         # ingested and skip anything at or below it.
         self._last_record_id: Optional[int] = None
         self._seen_without_id: set = set()
+        self.drain_counters = DrainCounters()
 
     def drain(self) -> List[DnsEvent]:
         with self._lock:
@@ -244,8 +247,6 @@ class WinDnsMonitor(threading.Thread):
 
     def run(self) -> None:
         while not self._stop.is_set():
-            try:
+            with drain_iteration(log, "windns", self.drain_counters):
                 self._poll()
-            except Exception as exc:  # noqa: BLE001 - never let the thread die
-                log.warning("windns poll failed: %s", exc, exc_info=True)
             self._stop.wait(self.poll_interval)

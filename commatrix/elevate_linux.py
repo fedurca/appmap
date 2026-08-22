@@ -459,4 +459,39 @@ def revoke_elevate(
             result.actions.append("systemctl daemon-reload")
         _systemctl("try-restart", UNIT_NAME)
 
+    # CODE-008: the pre-elevation unit User was recorded in the state file and
+    # then never looked at, so a revoke that failed to restore it reported
+    # success anyway. Restoring the drop-in normally puts User back, but if
+    # something else has since changed it the operator needs to know: the whole
+    # point of revoke is that the service ends up where it started.
+    _verify_unit_user_restored(result, state.get("unit_user"), reload=reload)
+
     return result
+
+
+def _verify_unit_user_restored(
+    result: ElevateResult, expected: Optional[str], reload: bool
+) -> None:
+    """Compare the effective unit User with the pre-elevation baseline."""
+
+    if not reload:
+        # Without a daemon-reload systemd still reports the old value.
+        return
+    actual = _read_unit_user()
+    if actual is None:
+        result.warnings.append(
+            "could not read the unit User after revoke; verify with "
+            f"'systemctl show {UNIT_NAME} -p User'"
+        )
+        return
+    if (expected or "") == (actual or ""):
+        result.actions.append(
+            f"unit User restored to {actual or '(default)'} (pre-elevation baseline)"
+        )
+        return
+    result.warnings.append(
+        f"unit User is now {actual or '(default)'} but was "
+        f"{expected or '(default)'} before elevate-linux ran; the service is "
+        "not back at its original privilege level - check for another drop-in "
+        f"under /etc/systemd/system/{UNIT_NAME}.d/"
+    )

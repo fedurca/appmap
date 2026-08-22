@@ -16,6 +16,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
@@ -139,9 +140,39 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8899, token: Option
     handler = make_handler(db_path, token)
     httpd = ThreadingHTTPServer((host, port), handler)
     log.info("commatrix collector server listening on %s:%d (db=%s)", host, port, db_path)
+
+    # CODE-006: only KeyboardInterrupt was handled, but systemctl stop and
+    # docker stop send SIGTERM, whose default action terminates the process
+    # outright. server_close() never ran, in-flight /ingest requests were cut
+    # mid-write, and the listening socket was left for the kernel to reap.
+    # Convert the signals into an orderly shutdown.
+    _install_shutdown_handlers(httpd)
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         log.info("collector server shutting down")
     finally:
         httpd.server_close()
+        log.info("collector server stopped")
+
+
+def _install_shutdown_handlers(httpd: ThreadingHTTPServer) -> None:
+    """Make SIGTERM/SIGHUP stop serve_forever() the same way Ctrl-C does."""
+
+    def _stop(signum, _frame):
+        log.info("received signal %s; shutting down the collector server", signum)
+        # shutdown() must not run in the handler's own thread: it blocks until
+        # serve_forever() returns, and serve_forever() is what we interrupted.
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+    for signame in ("SIGTERM", "SIGHUP", "SIGINT"):
+        sig = getattr(signal, signame, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _stop)
+        except (ValueError, OSError):
+            # Not the main thread (test harness, embedded use): leave the
+            # default disposition alone.
+            log.debug("could not install a %s handler", signame)

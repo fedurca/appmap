@@ -184,8 +184,13 @@ def host_params(server: Optional[str] = None) -> Dict[str, object]:
     return params
 
 
-def markdown(server: Optional[str] = None) -> str:
-    posture = ntp_posture(server)
+def markdown(
+    server: Optional[str] = None, posture: Optional[Dict[str, object]] = None
+) -> str:
+    """Render the time posture. Pass *posture* to reuse an existing probe."""
+
+    if posture is None:
+        posture = ntp_posture(server)
     off = posture["offset_seconds"]
     off_str = f"{off:+.6f}s ({posture['offset_source']})" if off is not None else "unknown"
     lines = [

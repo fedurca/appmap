@@ -24,6 +24,8 @@ from typing import Dict, List, Optional, Tuple
 
 from .conntrack import ConntrackEntry
 
+from .threadguard import DrainCounters, drain_item, drain_iteration
+
 log = logging.getLogger("commatrix.ctnetlink")
 
 NETLINK_NETFILTER = 12
@@ -245,6 +247,7 @@ class ConntrackEventListener(threading.Thread):
         self._active: Dict[Tuple, ConntrackEntry] = {}
         self._destroyed: List[ConntrackEntry] = []
         self._stop = threading.Event()
+        self.drain_counters = DrainCounters()
         self._sock: Optional[socket.socket] = None
         self.auth_failed = False
 
@@ -290,6 +293,15 @@ class ConntrackEventListener(threading.Thread):
 
     def run(self) -> None:
         try:
+            self._run()
+        except Exception as exc:  # noqa: BLE001 - a dead capture thread is silent
+            self.drain_counters.loop_errors += 1
+            log.error(
+                "conntrack event listener stopped unexpectedly: %s", exc, exc_info=True
+            )
+
+    def _run(self) -> None:
+        try:
             sock = _open_socket()
         except OSError as exc:
             self.auth_failed = True
@@ -319,8 +331,16 @@ class ConntrackEventListener(threading.Thread):
                     continue
                 if not buf:
                     continue
-                for entry in parse_messages(buf):
-                    self._record(entry)
+                # Cross-cutting: parse_messages() walks attacker-influenced
+                # netlink attributes and can raise struct.error, ValueError or
+                # IndexError on a truncated or unexpected message. None of them
+                # were caught here, so one odd message ended conntrack event
+                # capture for the lifetime of the process while the collector
+                # carried on reporting success.
+                with drain_iteration(log, "ctnetlink", self.drain_counters):
+                    for entry in parse_messages(buf):
+                        with drain_item(log, "ctnetlink entry", self.drain_counters):
+                            self._record(entry)
         finally:
             self._sock = None
             try:

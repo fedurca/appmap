@@ -32,6 +32,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from .threadguard import DrainCounters, drain_item, drain_iteration
+
 log = logging.getLogger("commatrix.dns")
 
 MONITOR_SOCKET = "/run/systemd/resolve/io.systemd.Resolve.Monitor"
@@ -263,6 +265,7 @@ class DnsMonitor(threading.Thread):
         self._stop = threading.Event()
         self._sock: Optional[socket.socket] = None
         self._backoff = _RECONNECT_BACKOFF_MIN
+        self.drain_counters = DrainCounters()
         # Counters kept for observability and for regression tests.
         self.oversize_resets = 0
         self.malformed_messages = 0
@@ -313,6 +316,7 @@ class DnsMonitor(threading.Thread):
             except Exception as exc:  # noqa: BLE001 - never let the thread die
                 if self._stop.is_set():
                     break
+                self.drain_counters.loop_errors += 1
                 log.warning("dns monitor loop error: %s; retrying", exc, exc_info=True)
             finally:
                 if not self._stop.is_set() and not self.auth_failed:
@@ -341,7 +345,8 @@ class DnsMonitor(threading.Thread):
                 while b"\x00" in buf:
                     raw, buf = buf.split(b"\x00", 1)
                     if raw:
-                        self._handle_message(raw)
+                        with drain_item(log, "dns message", self.drain_counters):
+                            self._handle_message(raw)
                 # SEC-012: whatever is left is an unterminated partial message.
                 # Cap it; a peer streaming megabytes without a NUL is either
                 # broken or malicious, and either way we drop the connection

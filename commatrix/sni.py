@@ -24,6 +24,8 @@ from typing import Dict, List, Optional, Tuple
 
 from .dns import IpNameCache
 
+from .threadguard import DrainCounters, drain_item
+
 log = logging.getLogger("commatrix.sni")
 
 _ETH_P_ALL = 0x0003
@@ -188,6 +190,7 @@ class SniMonitor(threading.Thread):
         self._events: List[SniEvent] = []
         self._ip_names = IpNameCache()
         self._stop = threading.Event()
+        self.drain_counters = DrainCounters()
         self._sock: Optional[socket.socket] = None
         self.failed = False
 
@@ -244,15 +247,12 @@ class SniMonitor(threading.Thread):
                     if self._stop.is_set():
                         break
                     continue
-                try:
+                ev = None
+                with drain_item(log, "sni frame", self.drain_counters):
                     ev = _parse_frame(frame, self.ports)
-                except (struct.error, IndexError, OSError, ValueError):
-                    ev = None
-                except Exception as exc:  # noqa: BLE001 - never kill the thread
-                    log.warning("SNI parse failed: %s", exc, exc_info=True)
-                    ev = None
                 if ev is not None:
-                    self._record(ev)
+                    with drain_item(log, "sni record", self.drain_counters):
+                        self._record(ev)
         finally:
             self._sock = None
             try:

@@ -471,13 +471,18 @@ def cmd_doh(args: argparse.Namespace) -> int:
 
     from . import dohcheck
 
+    # CODE-001: the posture probe reads the registry / resolved config and, on
+    # some paths, talks to the network. It used to run twice per invocation -
+    # once for the output and once for the exit code - so the reported result
+    # and the exit status could legitimately disagree.
+    posture = dohcheck.doh_posture()
     if args.format == "json":
-        text = json.dumps(dohcheck.doh_posture(), indent=2, default=str) + "\n"
+        text = json.dumps(posture, indent=2, default=str) + "\n"
     else:
-        text = dohcheck.markdown()
+        text = dohcheck.markdown(posture)
     _write_output(text, args.output)
     # Non-zero exit if DoH is enabled somewhere (useful for monitoring/CI).
-    return 2 if dohcheck.doh_posture().get("doh_enabled_anywhere") else 0
+    return 2 if posture.get("doh_enabled_anywhere") else 0
 
 
 def cmd_time(args: argparse.Namespace) -> int:
@@ -487,12 +492,15 @@ def cmd_time(args: argparse.Namespace) -> int:
 
     config = load_config(args.config)
     server = args.server or config.ntp_check_server
-    if args.format == "json":
-        text = json.dumps(timecheck.ntp_posture(server), indent=2, default=str) + "\n"
-    else:
-        text = timecheck.markdown(server)
-    _write_output(text, args.output)
+    # CODE-001: ntp_posture() sends an SNTP probe. Running it twice doubled the
+    # network traffic and let the printed offset differ from the one the exit
+    # code was derived from.
     posture = timecheck.ntp_posture(server)
+    if args.format == "json":
+        text = json.dumps(posture, indent=2, default=str) + "\n"
+    else:
+        text = timecheck.markdown(server, posture)
+    _write_output(text, args.output)
     # Non-zero exit if the clock is unsynced or materially off (for monitoring).
     off = posture.get("offset_seconds")
     bad = (not posture.get("synchronized")) or (

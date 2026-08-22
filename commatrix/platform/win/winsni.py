@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Tuple
 from ...dns import IpNameCache
 from ...sni import SniEvent, _MAP_TTL, parse_ip_packet
 
+from ...threadguard import DrainCounters, drain_item
+
 log = logging.getLogger("commatrix.win.winsni")
 
 
@@ -50,6 +52,7 @@ class WinSniMonitor(threading.Thread):
         self._events: List[SniEvent] = []
         self._ip_names = IpNameCache()
         self._stop = threading.Event()
+        self.drain_counters = DrainCounters()
         self._sock: Optional[socket.socket] = None
         self.failed = False
 
@@ -105,18 +108,17 @@ class WinSniMonitor(threading.Thread):
                     if self._stop.is_set():
                         break
                     continue
-                try:
+                # CODE-026: struct.error was not in the caught tuple, so one
+                # malformed frame unwound the capture thread and SNI
+                # enrichment went quiet with nothing in the log. The shared
+                # guard catches whatever the parser raises, counts it, and
+                # keeps the thread alive.
+                ev = None
+                with drain_item(log, "sni packet", self.drain_counters):
                     ev = parse_ip_packet(pkt, self.ports)
-                except (IndexError, OSError, struct.error, ValueError):
-                    # CODE-026: struct.error was not caught here, so one
-                    # malformed frame unwound the capture thread and SNI
-                    # enrichment went quiet with nothing in the log.
-                    ev = None
-                except Exception as exc:  # noqa: BLE001 - never kill the thread
-                    log.warning("SNI parse failed: %s", exc, exc_info=True)
-                    ev = None
                 if ev is not None:
-                    self._record(ev)
+                    with drain_item(log, "sni record", self.drain_counters):
+                        self._record(ev)
         finally:
             self._sock = None
             try:
