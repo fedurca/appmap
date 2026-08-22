@@ -2,7 +2,9 @@
 
 All notable changes to Commatrix are documented in this file.
 
-## [Unreleased] — Medium/Low remediation
+## [1.2.0] — 2026-08-22
+
+Medium/Low remediation. Deployed and running in production before tagging.
 
 Closes the remaining Medium, Low and Info findings from the review of `344112e`, plus the review's cross-cutting recommendations. Regression coverage: 244 → 401 tests; line coverage of the `commatrix` package is 71%.
 
@@ -91,7 +93,7 @@ Note for anyone who verified an earlier build: the S4U task registration, the Si
 
 Both runners have since been executed on real hardware and passed, so SEC-022, SEC-023, SEC-025, CODE-027 and CODE-031 are confirmed on a Windows host, and the container build, its attestations and the UID 65532 read path are confirmed against a working registry.
 
-**One item is still open, and the Windows runner cannot close it**: the MSI build's Sigstore verification against a real `.sigstore` bundle. That step lives in the release workflow's `msi` job, not in the elevate path, so it is exercised by cutting a release rather than by running the script. If the signature check fails there, the job fails and no MSI is published — which is the intent.
+**One item is closed by this release itself**: the MSI build's Sigstore verification against a real `.sigstore` bundle. That step lives in the release workflow's `msi` job, not in the elevate path, so cutting the release is what exercises it. Every packaging job is `continue-on-error`, deliberately — a flaky snapcraft run should not block a security fix from shipping — but that made a failure silent: a rejected interpreter would publish a release with no Windows package and nothing saying so. The release now lists which packages it contains and names any that are missing, in the job summary, as a workflow annotation, and in the release notes.
 
 ### Notes on the review itself
 

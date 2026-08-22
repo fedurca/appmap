@@ -137,8 +137,8 @@ Windows: HOTOVO
      prošlo bez chyby)
 
 
-JEDINÁ ZBÝVAJÍCÍ POLOŽKA
-========================
+POSLEDNÍ POLOŽKA — UZAVŘE JI SÁM RELEASE
+========================================
 
 [ ] MSI build: `python -m sigstore verify identity` proti SKUTEČNÉMU
     .sigstore bundlu z python.org.
@@ -149,17 +149,41 @@ JEDINÁ ZBÝVAJÍCÍ POLOŽKA
     přesně ty flagy, které build volá, a že trust anchor pro 3.12
     existuje. Chybí jediné: že podpis proti reálnému bundlu projde.
 
-    Vyřeší se sám při prvním releasu:
+    Vyřeší se při releasu 1.2.0 (viz níže).
 
-        git tag v1.2.0 && git push origin v1.2.0
+    POZOR na jednu věc: všechny balíčkovací joby mají
+    continue-on-error: true — záměrně, aby rozbitý snapcraft neblokoval
+    vydání bezpečnostní opravy. Do 1.2.0 to ale znamenalo, že selhání
+    sigstore kroku by vydalo release BEZ Windows MSI a nikde by to
+    nebylo vidět. Opraveno: release teď vypíše, které balíčky obsahuje,
+    a chybějící pojmenuje v job summary, jako workflow anotaci
+    i v release notes. Po vydání se na to podívej.
 
-    Když by sigstore krok selhal, job "msi" spadne a release se
-    nedokončí — což je záměr: radši žádné MSI než MSI s neověřeným
-    interpretem. Nouzový ventil pro lokální experiment je
-    -AllowUnverifiedPython, do CI nepatří.
+    Nouzový ventil -AllowUnverifiedPython je jen pro lokální
+    experiment, do CI nepatří.
 
-    Případně bez tagu: spustit release workflow ručně přes
-    "Run workflow" s version 1.2.0-rc1 a podívat se na job "msi".
+
+RELEASE 1.2.0 — PŘIPRAVENO K PUSHNUTÍ
+=====================================
+
+Verze je nabumpnutá (commatrix/__init__.py, pyproject.toml), CHANGELOG
+má sekci [1.2.0]. main je na 511961e a je předkem větve, takže
+fast-forward projde:
+
+    git checkout main
+    git merge --ff-only fix/review-medium
+    git push origin main
+    git tag -a v1.2.0 -m "Commatrix 1.2.0 — security review remediation"
+    git push origin v1.2.0
+
+Push tagu spustí release workflow. Po doběhnutí zkontroluj:
+  - job "msi" prošel (tím padne poslední položka výše)
+  - release notes neobsahují sekci "Missing from this release"
+  - ověření podpisů:
+      cosign verify-blob SHA256SUMS --signature SHA256SUMS.sig \
+        --certificate SHA256SUMS.pem \
+        --certificate-identity-regexp '^https://github.com/fedurca/appmap/' \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 
 DOPORUČENÝ DALŠÍ KROK
@@ -176,8 +200,7 @@ Podklady pro recenzenta:
   - CI joby hardening / ansible / container-uid / supply-chain-pins —
     kontroly, které dřív byly "ověřit ručně na reálném stroji"
 
-CHANGELOG má zatím [Unreleased]. Až budeš chtít, přejmenuj na 1.2.0
-a otaguj — tím se zároveň uzavře i poslední položka výše.
+CHANGELOG už má sekci [1.2.0].
 
 
 CO SE UDĚLALO (na větvi fix/review-medium)

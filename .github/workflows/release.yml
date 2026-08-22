@@ -248,6 +248,54 @@ jobs:
           fi
           cd release && sha256sum * > SHA256SUMS
 
+      # Every packaging job is continue-on-error, so one of them failing does
+      # not stop the release -- a flaky snapcraft run should not block a
+      # security fix from shipping. What it must not do is fail *silently*:
+      # without this, a broken MSI job (say, the SEC-033 signature check
+      # rejecting the embedded interpreter) publishes a release with no Windows
+      # package and nothing anywhere says so. Name what is missing, in the job
+      # summary, as a workflow annotation, and in the release notes themselves.
+      - name: Report which packages are present
+        id: manifest
+        run: |
+          set -u
+          missing=""
+          present=""
+          check() {  # <label> <glob>
+            if compgen -G "release/$2" > /dev/null; then
+              present="$present- $1\n"
+            else
+              missing="$missing- **$1** — the \`$3\` job did not produce it\n"
+            fi
+          }
+          check "Python wheel"   "*.whl"      sdist-wheel
+          check "Source archive" "*.tar.gz"   sdist-wheel
+          check "Windows MSI"    "*.msi"      msi
+          check "AppImage"       "*.AppImage" appimage
+          check "Snap"           "*.snap"     snap
+          check "Flatpak"        "*.flatpak"  flatpak
+          check "SBOM"           "*.cdx.json" sbom
+
+          {
+            echo "## Packages"
+            echo
+            printf "%b" "$present"
+            if [ -n "$missing" ]; then
+              echo
+              echo "### Missing from this release"
+              echo
+              printf "%b" "$missing"
+              echo
+              echo "These jobs are non-blocking, so the release still published."
+              echo "Check the workflow run before treating this as complete."
+            fi
+          } > release-notes.md
+
+          cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$missing" ]; then
+            printf '::warning::release is missing packages:\n%b' "$missing"
+          fi
+
       # SEC-041: checksums establish integrity against accidental corruption,
       # not authenticity -- anyone who can edit the release can replace both
       # the artifact and its line in SHA256SUMS. A keyless Sigstore signature
@@ -298,6 +346,7 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.tag }}
           files: release/*
+          body_path: release-notes.md
           fail_on_unmatched_files: false
           generate_release_notes: ${{ github.event_name != 'release' }}
           make_latest: true
