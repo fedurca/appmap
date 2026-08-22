@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "SEC-033: trust anchors for the Windows embeddable CPython that the MSI",
+    "embeds. python.org publishes only an MD5 next to each file, and MD5 has",
+    "practical chosen-prefix collisions, so it is not a supply-chain control.",
+    "It does publish a Sigstore bundle per artifact, which proves the file was",
+    "signed by that series' release manager -- a stronger statement than any",
+    "hash we could record, and one that does not need a new value per patch",
+    "release.",
+    "Identities copied from https://www.python.org/download/sigstore/ (the",
+    "release-manager table, PEP 693 and successors). Verify against that page",
+    "before adding a series."
+  ],
+  "issuer_note": "cert_oidc_issuer differs per release manager; it is not always Google.",
+  "series": {
+    "3.10": {"cert_identity": "pablogsal@python.org", "cert_oidc_issuer": "https://accounts.google.com"},
+    "3.11": {"cert_identity": "pablogsal@python.org", "cert_oidc_issuer": "https://accounts.google.com"},
+    "3.12": {"cert_identity": "thomas@python.org", "cert_oidc_issuer": "https://accounts.google.com"},
+    "3.13": {"cert_identity": "thomas@python.org", "cert_oidc_issuer": "https://accounts.google.com"},
+    "3.14": {"cert_identity": "hugo@python.org", "cert_oidc_issuer": "https://github.com/login/oauth"},
+    "3.15": {"cert_identity": "hugo@python.org", "cert_oidc_issuer": "https://github.com/login/oauth"}
+  }
+}

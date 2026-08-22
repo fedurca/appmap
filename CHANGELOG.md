@@ -48,6 +48,23 @@ Three of those items turned out to be runnable offline, so they now run in CI (`
 
 Deliberately **not** applied, with the reasons recorded next to them so the `systemd-analyze` findings are not "fixed" later by someone without the context: `ProtectKernelTunables=true` (toggling the `nf_conntrack` sysctls is the collector's job), `RestrictAddressFamilies=` on the collector (it needs `AF_UNIX`, `AF_NETLINK`, `AF_INET`/`AF_INET6`, plus `AF_PACKET` when SNI is on — an allow list that omits `AF_PACKET` breaks SNI silently), `UMask=0077` (the data is intentionally group-readable by the `commatrix` group), and `IPAddressDeny=any` on the export unit (it doubles as the `push` transport).
 
+### Supply-chain pins, filled in
+
+`SEC-040` all fifteen Actions are pinned to commit SHAs, `SEC-044` the base image to the multi-arch index digest `sha256:2c941e86…63c4a`, and `SEC-033` the embedded CPython is verified by signature. Enforcement is on, so a regression now fails the build.
+
+Two things worth knowing about how those were produced:
+
+- The resolver was rewritten from the REST API to `git ls-remote`. The API returned a *different* commit for `actions/checkout@v4` than the tag actually points at, and more importantly it hides the annotated-tag problem: for four of the fifteen actions (`attest-build-provenance`, `snapcore/action-build`, `flatpak-github-actions`, `cosign-installer`) `refs/tags/vX` advertises the **tag object's** SHA, not the commit's — and a workflow pinned to a tag-object SHA does not run. `ls-remote` asks for the peeled value, has no rate limit, and is the ref advertisement itself rather than a field in a JSON summary. Every SHA is then independently confirmed with `git fetch --depth 1 <sha>`; `--write` refuses to record a value it cannot fetch back.
+- `SEC-033` is not a hash pin. python.org publishes only an MD5 beside each download, and chosen-prefix collisions against MD5 are practical, so it establishes nothing against an attacker who can serve a different file. The build now verifies the **Sigstore bundle** python.org publishes alongside the artifact, which proves who produced it and does not need a fresh value for every patch release. The release-manager identities live in `packaging/windows/python-embed-trust.json`, copied from python.org's own table — note the OIDC issuer is *not* Google for every series, and hardcoding one would silently verify against the wrong thing. A recorded SHA256 remains an optional second check for reproducibility.
+
+### Verification, round two
+
+The remaining "verify on a real host" items were run rather than reasoned about, and two of them found bugs.
+
+- **`commatrix serve` and SIGTERM (CODE-006, the other half).** Handling the signal was not enough. `ThreadingHTTPServer` runs handlers on daemon threads, so once `serve_forever()` returns the interpreter exits and anything mid-request dies where it stands. Measured: SIGTERM during an `/ingest` merge gave the client an empty reply and wrote **zero rows** — the snapshot that agent had just spent a poll interval producing was gone, with no error on either side. Shutdown now waits for in-flight handlers, with a 30-second deadline so one wedged request cannot stop the unit from stopping.
+- **`--profile topology` costs far more than "less attribution".** Measured on a 37-socket container: **92% of sockets attributed under `attribution` versus 8% under `topology`, and 0% of the sockets owned by another user.** Without `CAP_DAC_READ_SEARCH` the collector cannot read `/proc/<pid>/fd` for other users' processes at all, so it is a topology-only profile in practice. That number is now in the `--profile` help and in the warning `elevate-linux` prints, and `packaging/measure_attribution.py` measures it on any host under any profile.
+- **`--revoke`'s new unit-User check does not cry wolf**: it stays silent when the user matches, distinguishes "could not read" from "drifted", and is skipped when there was no daemon-reload.
+
 ### Notes on the review itself
 
 - **SEC-028** could not be fixed the way it is usually written. The standard approach — hooking expat through `XMLParser.parser` — does nothing on Python 3.9+, because `xml.etree` no longer exposes that attribute; code written that way passes its own tests while providing no protection. Replaced with a pre-parse rejection of DOCTYPE/ENTITY/NOTATION markup.

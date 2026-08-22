@@ -1,4 +1,4 @@
 {
-  "enforce": false,
-  "note": "Set by packaging/pin_supply_chain.py --write once real pins exist. While false, unpinned dependencies are reported as warnings instead of failing CI."
+  "enforce": true,
+  "note": "Every Action, the container base image and the embedded Windows CPython are pinned. Any regression now fails the supply-chain-pins CI job. Refresh the pins with: python packaging/pin_supply_chain.py --write"
 }

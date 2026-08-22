@@ -32,15 +32,21 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from typing import Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKFLOW_DIR = os.path.join(REPO_ROOT, ".github", "workflows")
 DOCKERFILE = os.path.join(REPO_ROOT, "Dockerfile")
 PY_EMBED_MANIFEST = os.path.join(
     REPO_ROOT, "packaging", "windows", "python-embed-sha256.txt"
+)
+PY_EMBED_TRUST = os.path.join(
+    REPO_ROOT, "packaging", "windows", "python-embed-trust.json"
 )
 POLICY_FILE = os.path.join(REPO_ROOT, "packaging", "supply-chain-policy.json")
 
@@ -120,10 +126,48 @@ def _get(url: str, headers=None) -> bytes:
 
 
 # -- SEC-040: GitHub Actions ------------------------------------------------
-def resolve_action_sha(action: str, ref: str) -> str:
-    """Return the commit SHA a tag or branch of *action* points at."""
+def _resolve_action_sha_git(owner_repo: str, ref: str) -> Optional[str]:
+    """Resolve a tag or branch to its commit SHA with ``git ls-remote``.
 
-    owner_repo = "/".join(action.split("/")[:2])
+    Preferred over the REST API for three reasons, all of them learned the
+    hard way while producing the first set of pins:
+
+    * ``refs/tags/<v>`` for an *annotated* tag advertises the tag object's SHA,
+      not the commit's. A workflow pinned to a tag-object SHA does not run --
+      GitHub only accepts a commit. ``^{}`` asks for the peeled value, and
+      several of the actions this repository uses (attest-build-provenance,
+      snapcore/action-build, flatpak, cosign-installer) are annotated.
+    * ``/repos/X/commits/<ref>`` resolves refs in GitHub's own precedence
+      order, which is not necessarily the tag you meant.
+    * the unauthenticated REST API allows 60 requests an hour; ls-remote has
+      no such limit.
+    """
+
+    url = f"https://github.com/{owner_repo}"
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", url,
+             f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"],
+            capture_output=True, text=True, timeout=90, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+
+    found = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            found[parts[1]] = parts[0]
+    for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
+        sha = found.get(candidate)
+        if sha and _SHA_RE.match(sha):
+            return sha
+    return None
+
+
+def _resolve_action_sha_api(owner_repo: str, ref: str) -> str:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     headers = {"Accept": "application/vnd.github+json"}
     if token:
@@ -132,8 +176,46 @@ def resolve_action_sha(action: str, ref: str) -> str:
     data = json.loads(_get(url, headers))
     sha = data.get("sha")
     if not sha or not _SHA_RE.match(sha):
-        raise RuntimeError(f"no commit sha for {action}@{ref}")
+        raise RuntimeError(f"no commit sha for {owner_repo}@{ref}")
     return sha
+
+
+def resolve_action_sha(action: str, ref: str) -> str:
+    """Return the commit SHA a tag or branch of *action* points at."""
+
+    owner_repo = "/".join(action.split("/")[:2])
+    sha = _resolve_action_sha_git(owner_repo, ref)
+    if sha:
+        return sha
+    return _resolve_action_sha_api(owner_repo, ref)
+
+
+def verify_action_sha(action: str, sha: str) -> bool:
+    """Confirm *sha* really is a commit in *action*'s repository.
+
+    A pin nobody checked is a pin that can be a typo. Fetching the object is
+    the cheapest end-to-end proof that the value is real and is a commit.
+    """
+
+    owner_repo = "/".join(action.split("/")[:2])
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            subprocess.run(["git", "init", "-q", tmp],
+                           capture_output=True, timeout=30, check=True)
+            fetch = subprocess.run(
+                ["git", "-C", tmp, "fetch", "-q", "--depth", "1",
+                 f"https://github.com/{owner_repo}", sha],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+            if fetch.returncode != 0:
+                return False
+            kind = subprocess.run(
+                ["git", "-C", tmp, "cat-file", "-t", sha],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            return kind.stdout.strip() == "commit"
+        except (OSError, subprocess.SubprocessError):
+            return False
 
 
 def iter_workflow_files():
@@ -181,7 +263,14 @@ def write_actions() -> list:
                 continue
             key = (action, ref)
             if key not in cache:
-                cache[key] = resolve_action_sha(action, ref)
+                resolved = resolve_action_sha(action, ref)
+                if not verify_action_sha(action, resolved):
+                    raise RuntimeError(
+                        f"{action}@{ref} resolved to {resolved}, but that is not "
+                        "a fetchable commit in the repository; refusing to write "
+                        "a pin that would break the build"
+                    )
+                cache[key] = resolved
             sha = cache[key]
             comment = rest.strip()
             if comment.startswith("#"):
@@ -292,16 +381,42 @@ def read_manifest() -> dict:
     return entries
 
 
+def read_trust_anchors() -> dict:
+    try:
+        with open(PY_EMBED_TRUST, encoding="utf-8") as fh:
+            return json.load(fh).get("series", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def check_python_embed(version: str) -> list:
+    """The embedded interpreter must be verifiable before it is unpacked.
+
+    Two independent controls, either of which is sufficient:
+
+    * a Sigstore trust anchor for the version series -- python.org signs every
+      release artifact, and the signature proves who produced it. This is the
+      primary control: it does not need a new value for each patch release,
+      and it is what python.org itself recommends.
+    * a recorded SHA256 for this exact file -- reproducibility, and it also
+      catches a differently-signed-but-swapped artifact.
+
+    Not accepted: the MD5 python.org prints beside the download. Chosen-prefix
+    collisions against MD5 are practical, so it establishes nothing against an
+    attacker who can serve a different file.
+    """
+
     filename = f"python-{version}-embed-amd64.zip"
-    entries = read_manifest()
-    if filename not in entries:
-        return [
-            f"packaging/windows/python-embed-sha256.txt: no SHA256 recorded for "
-            f"{filename}; the MSI build would install an unverified interpreter "
-            "(SEC-033)"
-        ]
-    return []
+    series = ".".join(version.split(".")[:2])
+    if series in read_trust_anchors():
+        return []
+    if filename in read_manifest():
+        return []
+    return [
+        f"packaging/windows/python-embed-trust.json: no Sigstore trust anchor "
+        f"for CPython {series} and no SHA256 recorded for {filename}; the MSI "
+        "build would install an unverified interpreter (SEC-033)"
+    ]
 
 
 def write_python_embed(version: str) -> list:

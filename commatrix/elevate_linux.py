@@ -80,6 +80,17 @@ _ATTRIBUTION_WARNING = (
     "'--profile topology' if you do not need per-process attribution."
 )
 
+_TOPOLOGY_NOTE = (
+    "profile 'topology' does not just weaken attribution, it effectively "
+    "removes it: without CAP_DAC_READ_SEARCH the collector cannot read "
+    "/proc/<pid>/fd for processes owned by other users, so their sockets map "
+    "to no process at all. Measured on a container with 37 sockets: 92% of "
+    "sockets attributed under 'attribution' versus 8% under 'topology', and "
+    "0% of the sockets owned by another user. Flows, ports, peers and service "
+    "identification by port are unaffected. Measure it on your own host with "
+    "packaging/measure_attribution.py."
+)
+
 # Kept for backwards compatibility with callers importing the old name.
 ELEVATE_CAPS = CAP_PROFILES[DEFAULT_PROFILE]
 
@@ -432,6 +443,8 @@ def apply_elevate(
         result.actions.append(f"[dry-run] caps: {', '.join(caps)}")
         if profile == "attribution":
             result.warnings.append(_ATTRIBUTION_WARNING)
+        else:
+            result.warnings.append(_TOPOLOGY_NOTE)
         _ensure_service_user(result, dry_run=True)
         return result
 
@@ -459,6 +472,8 @@ def apply_elevate(
     )
     if profile == "attribution":
         result.warnings.append(_ATTRIBUTION_WARNING)
+    else:
+        result.warnings.append(_TOPOLOGY_NOTE)
     result.actions.append(
         "did NOT grant: sudoers, setuid, CAP_SETUID, CAP_SYS_ADMIN, interactive login"
     )

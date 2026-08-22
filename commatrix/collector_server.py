@@ -18,6 +18,7 @@ import json
 import logging
 import signal
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
@@ -131,6 +132,78 @@ def _token_ok(expected: Optional[str], presented: Optional[str]) -> bool:
     )
 
 
+# How long shutdown waits for requests that are already being served. Long
+# enough for a large snapshot merge, short enough that one wedged request
+# cannot stop the unit from stopping.
+SHUTDOWN_GRACE_SECONDS = 30.0
+
+
+class GracefulHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that lets in-flight requests finish on shutdown.
+
+    CODE-006, second half. Handling SIGTERM is not enough on its own:
+    ThreadingHTTPServer runs each request on a *daemon* thread, so once
+    serve_forever() returns, the interpreter exits and any handler still
+    running is killed where it stands. Measured: SIGTERM during an /ingest
+    merge left the client with an empty reply and nothing written -- the
+    snapshot that agent had just spent a poll interval producing was gone, and
+    neither side logged an error.
+
+    Daemon threads stay (a wedged handler must never stop the unit from
+    stopping); shutdown just waits for them, with a deadline.
+    """
+
+    daemon_threads = True
+    shutdown_grace_seconds = SHUTDOWN_GRACE_SECONDS
+
+    def __init__(self, *args, **kwargs):
+        self._active_lock = threading.Lock()
+        self._active = set()
+        super().__init__(*args, **kwargs)
+
+    def process_request_thread(self, request, client_address):  # noqa: D102
+        current = threading.current_thread()
+        with self._active_lock:
+            self._active.add(current)
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._active_lock:
+                self._active.discard(current)
+
+    def inflight(self) -> int:
+        with self._active_lock:
+            return sum(1 for t in self._active if t.is_alive())
+
+    def wait_for_inflight(self, timeout: Optional[float] = None) -> bool:
+        """Block until in-flight handlers finish. True if all of them did."""
+
+        grace = self.shutdown_grace_seconds if timeout is None else timeout
+        deadline = time.monotonic() + grace
+        announced = False
+        while True:
+            with self._active_lock:
+                pending = [t for t in self._active if t.is_alive()]
+            if not pending:
+                return True
+            if not announced:
+                log.info(
+                    "waiting up to %.0fs for %d in-flight request(s) to finish",
+                    grace, len(pending),
+                )
+                announced = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.warning(
+                    "%d request(s) still running after %.0fs; exiting anyway. "
+                    "Their writes are rolled back by SQLite, so the database "
+                    "stays consistent, but those snapshots were not stored.",
+                    len(pending), grace,
+                )
+                return False
+            pending[0].join(min(0.2, remaining))
+
+
 def serve(db_path: str, host: str = "127.0.0.1", port: int = 8899, token: Optional[str] = None) -> None:
     if not token:
         raise ValueError(
@@ -138,7 +211,7 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8899, token: Option
             "the central database and must not be exposed unauthenticated"
         )
     handler = make_handler(db_path, token)
-    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd = GracefulHTTPServer((host, port), handler)
     log.info("commatrix collector server listening on %s:%d (db=%s)", host, port, db_path)
 
     # CODE-006: only KeyboardInterrupt was handled, but systemctl stop and
@@ -153,6 +226,9 @@ def serve(db_path: str, host: str = "127.0.0.1", port: int = 8899, token: Option
     except KeyboardInterrupt:
         log.info("collector server shutting down")
     finally:
+        # Stop accepting first, then let whatever is already being handled
+        # finish before the interpreter tears the daemon threads down.
+        httpd.wait_for_inflight()
         httpd.server_close()
         log.info("collector server stopped")
 

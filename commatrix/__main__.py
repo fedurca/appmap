@@ -576,10 +576,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("topology", "attribution"),
         default="attribution",
         help="capability profile. 'topology' grants only CAP_NET_ADMIN and "
-        "CAP_NET_RAW: flows and services are still collected, but processes "
-        "owned by other users are not attributed. 'attribution' (default) "
-        "adds CAP_DAC_READ_SEARCH + CAP_SYS_PTRACE, which together are "
-        "read-equivalent to root over the whole host",
+        "CAP_NET_RAW: flows and services are still collected, but NO socket "
+        "owned by another user is attributed to a process -- measured 8%% "
+        "attribution coverage versus 92%% with the default, and 0%% for "
+        "other users' sockets. Treat it as topology-only. 'attribution' "
+        "(default) adds CAP_DAC_READ_SEARCH + CAP_SYS_PTRACE, which together "
+        "are read-equivalent to root over the whole host. Measure it on your "
+        "own host with packaging/measure_attribution.py",
     )
     p_elev_l.add_argument("-o", "--output", help="write markdown summary to file")
     p_elev_l.set_defaults(func=cmd_elevate_linux)

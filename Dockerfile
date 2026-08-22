@@ -17,17 +17,16 @@
 # the exact opposite of the least-privilege model the elevate-linux and
 # elevate-windows paths are built around. --cap-add of the three capabilities
 # above is strictly more restrictive and is all the collector needs.
-# SEC-044: this base image must be pinned to a digest. A tag is mutable -- the
-# same Dockerfile builds different software on different days, and there is
-# nothing to roll back to. The pin is not hardcoded here by hand because a
-# wrong digest breaks every build; resolve and write it with
+# SEC-044: the base image is pinned to a digest. A tag is mutable -- the same
+# Dockerfile would build different software on different days with nothing to
+# roll back to. Digest resolved from Docker Hub for the multi-arch index (NOT
+# a single-arch manifest: the release builds linux/amd64 and linux/arm64 from
+# the same line), last updated upstream 2026-08-16.
 #
-#   python packaging/pin_supply_chain.py --write
-#
-# which rewrites this FROM to  python:3.12-slim@sha256:<digest>, and is
-# enforced by the supply-chain-pins job in CI. Dependabot (docker ecosystem)
-# keeps the digest current afterwards.
-FROM python:3.12-slim
+# Refresh with:  python packaging/pin_supply_chain.py --write
+# Dependabot (docker ecosystem) opens the update PRs; the supply-chain-pins CI
+# job fails if the digest is ever dropped.
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
 
 ARG VERSION=0.0.0
 LABEL org.opencontainers.image.title="commatrix" \

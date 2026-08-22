@@ -4,105 +4,112 @@ COMMATRIX — ZBÝVAJÍCÍ PRÁCE PO BEZPEČNOSTNÍ REVIZI
 Revize:     commatrix-review.pdf, 2026-07-22
 Revidováno: 344112e2ad063f546e61ada01a62f1c133f48d91
 Větev oprav: fix/review-medium (navazuje na tag 1.1.0)
-Stav testů: 401 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
-Pokrytí:    71 % řádků balíčku commatrix
+Stav testů: 439 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
+Pokrytí:    ~72 % řádků balíčku commatrix
 
 Nálezů celkem 81: 5 Critical, 6 High, 38 Medium, 30 Low, 2 Info.
-Všechny jsou uzavřené v kódu. Zbývá pouze ověření na reálném stroji
-a jeden příkaz, který potřebuje síť (viz níže).
+VŠECHNY UZAVŘENÉ. Supply-chain piny jsou doplněné a vynucené.
+Zbývá jen to, co fyzicky potřebuje Windows nebo Docker daemon.
 
 
-ZBÝVAJÍ POUZE DVĚ VĚCI
-======================
+SUPPLY CHAIN — HOTOVO
+=====================
 
-1) JEDEN PŘÍKAZ SE SÍTÍ — doplnění supply-chain pinů
-----------------------------------------------------
+Piny jsou doplněné skutečnými hodnotami a enforce=true, takže každá
+regrese teď shodí CI.
 
-    python packaging/pin_supply_chain.py --write
+  SEC-040  všech 15 Actions zapíchnuto na commit SHA
+  SEC-044  base image na digest multi-arch indexu
+           sha256:2c941e86...63c4a (python:3.12-slim, upstream 2026-08-16)
+  SEC-033  Sigstore ověření podpisu python.org před rozbalením
 
-Vyřeší SEC-040 (GitHub Actions na SHA), SEC-044 (digest base image)
-a SEC-033 (SHA256 embedded Pythonu pro MSI). Skript sáhne na
-api.github.com, registry-1.docker.io a python.org, zapíše skutečné
-hodnoty do .github/workflows/*, Dockerfile a
-packaging/windows/python-embed-sha256.txt.
+Poznámky k tomu, jak se to dělalo:
 
-Piny NEJSOU předvyplněné záměrně. Vymyšlený digest rozbije každý build
-a naučí všechny check obcházet — to je horší než žádný pin. Mechanismus
-i vynucení (CI job supply-chain-pins, offline) jsou hotové; chybí jen
-skutečné hodnoty, které nešly zjistit z prostředí bez přístupu k těmto
-službám.
+  - Resolver jsem přepsal z REST API na `git ls-remote`. API vrátilo pro
+    actions/checkout@v4 JINÝ commit než na co ten tag ukazuje, a hlavně
+    neumí peelovat anotované tagy — u 4 z 15 Actions (attest-build-provenance,
+    snapcore/action-build, flatpak, cosign-installer) je `refs/tags/vX`
+    SHA tag OBJEKTU, ne commitu. Takový pin GitHub nespustí.
+  - Každý SHA je navíc ověřený `git fetch --depth 1 <sha>` proti tomu
+    repu — pin, který nikdo nezkontroloval, je pin, který může být překlep.
+    To dělá i `--write` automaticky a odmítne zapsat neověřitelnou hodnotu.
+  - SEC-033: python.org publikuje vedle souboru jen MD5. Chosen-prefix
+    kolize na MD5 jsou praktické, takže jako supply-chain kontrola je to
+    k ničemu. Místo hashe se ověřuje Sigstore bundle, který python.org
+    taky publikuje — silnější tvrzení a nepotřebuje novou hodnotu pro
+    každý patch release. Identity release managerů jsou v
+    packaging/windows/python-embed-trust.json, opsané z
+    https://www.python.org/download/sigstore/ (pozor, issuer NENÍ u všech
+    Google — 3.14+ používá GitHub OAuth).
 
-Po spuštění: zkontrolovat diff, commitnout. Dependabot
-(.github/dependabot.yml) už piny drží aktuální sám.
-
-Do té doby CI job supply-chain-pins hlásí nálezy jako WARNING
-anotace a projde (packaging/supply-chain-policy.json, enforce=false).
-Trvale červený build je build, který nikdo nečte, a tenhle nález
-nejde opravit z pull requestu — chce jednu síťovou session. Po
-`--write` se enforce přepne na true samo a každá regrese pak build
-shodí. Pokud chceš červeno hned: enforce=true, nebo `--check --enforce`.
+Obnova pinů:  python packaging/pin_supply_chain.py --write
+Dependabot je pak drží aktuální sám.
 
 
-2) OVĚŘENÍ NA REÁLNÉM STROJI
------------------------------
+OVĚŘENÍ — CO UŽ JE HOTOVÉ
+=========================
 
-Nic z toho nešlo otestovat v kontejneru (chybí systemd, Windows,
-Docker daemon).
+Ukázalo se, že většina "potřebuje reálný stroj" reálný stroj nepotřebuje.
+Všechno níže běží v CI (joby "hardening" a "container-uid"), takže se to
+neověřuje jednou, ale při každém commitu.
 
-Linux — HOTOVO, ověřeno v kontejneru a zapojeno do CI:
-[x] visudo -cf na obou generovaných sudoers (i s uživatelem
-    obsahujícím tečku) — parsed OK
-[x] systemd-analyze security --offline=true na všech unitách
-    i na base+drop-in (systemd 255 umí offline režim, běžící
-    systemd není potřeba). Výsledky a nalezená vada níže.
-[x] ProtectSystem=strict vs. StateDirectory — nekolidují,
-    StateDirectory/RuntimeDirectory jsou pod strict automaticky
-    zapisovatelné. Doplněno pro případ, kdy si operátor přesune
-    database/html_report_path/snapshot_dir jinam.
-Obojí hlídá `python packaging/check_hardening.py` (CI job "hardening").
+[x] visudo -cf na obou generovaných sudoers, i s uživatelem s tečkou
+[x] systemd-analyze security --offline=true na všech unitách i na
+    base+drop-in (systemd 255 běžící systemd nepotřebuje)
+[x] ProtectSystem=strict vs. StateDirectory — nekolidují
+[x] Docker UID 65532
+[x] SIGTERM na commatrix serve — end-to-end, včetně requestu v letu
+[x] elevate-linux --revoke: kontrola unit User nehlásí falešný poplach
+[x] elevate-linux --profile topology: degradace atribuce ZMĚŘENA
 
-Linux — zbývá ověřit na živém hostu:
-[ ] elevate-linux --profile topology: jak moc se degraduje atribuce
-    (měřitelné jen na stroji se skutečnými procesy)
-[ ] elevate-linux --revoke: nová kontrola CODE-008 hlásí, když se
-    unit User nevrátil na původní hodnotu — ověřit, že nehlásí
-    falešný poplach na běžné instalaci
-[ ] SIGTERM na commatrix serve: čisté ukončení, žádný uříznutý
-    /ingest zápis (CODE-006)
+Co ta měření našla (detaily v CHANGELOG.md):
+
+  1. Profil topology byl MÉNĚ uzavřený než attribution a horší než
+     žádná elevace (6.5 vs 5.2 vs 6.4). Celý sandbox blok seděl uvnitř
+     větve attribution. Opraveno; teď 4.3 vs 4.4.
+  2. V kontejneru nefungoval ŽÁDNÝ read-only příkaz. Není to výstupní
+     adresář, ale adresář databáze: WAL čtenář musí vedle DB vytvořit
+     -shm. Opraveno fallbackem na immutable režim.
+  3. CODE-006 byla opravená jen z půlky. Obsloužit SIGTERM nestačí —
+     ThreadingHTTPServer používá daemon vlákna, takže request v letu se
+     zabil. Naměřeno: SIGTERM během /ingest merge = prázdná odpověď
+     klientovi a NULA uložených řádků. Doplněn grace period.
+  4. Degradace u --profile topology je drastická, ne mírná: 92 % → 8 %
+     pokrytí atribuce, a 0 % u socketů cizích uživatelů. Číslo je teď
+     v nápovědě `--profile` i ve varování při elevaci. Změř si to na
+     svém hostu: packaging/measure_attribution.py
+
+
+OVĚŘENÍ — CO OPRAVDU ZBÝVÁ
+==========================
+
+Jen věci, které fyzicky potřebují Windows nebo Docker daemon.
 
 Windows:
 [ ] elevate-windows bez --allow-sedebug — funguje atribuce?
 [ ] elevate-windows: registrace úlohy přes S4U XML (SEC-023).
-    Ověřit, že úloha po restartu skutečně naběhne pod účtem
-    'commatrix' bez uloženého hesla. Fallback na /rp se hlásí
-    warningem — pokud ho uvidíš, S4U selhalo.
-[ ] elevate-windows: po rebindu musí být DB zapisovatelná pro
-    servisní účet (SEC-025). Dříve to končilo Access Denied.
+    Ověřit, že úloha po restartu naběhne pod účtem 'commatrix' bez
+    uloženého hesla. Fallback na /rp se hlásí warningem — pokud ho
+    uvidíš, S4U selhalo.
+[ ] elevate-windows: po rebindu musí být DB zapisovatelná pro servisní
+    účet (SEC-025). Dříve to končilo Access Denied.
+[ ] MSI build: Sigstore ověření embedded Pythonu (SEC-033) — projde
+    `python -m sigstore verify identity` na windows-latest runneru?
 [ ] opravený CPU governor (CODE-031) — os.times() na Windows
-[ ] WinDnsMonitor: bookmark podle EventRecordID (CODE-027) —
-    ověřit, že se DNS eventy přestaly duplikovat
+[ ] WinDnsMonitor: bookmark podle EventRecordID (CODE-027)
 
 Docker:
-[x] USER 65532 — OVĚŘENO a byla to CHYBA, jiná než zpráva čekala.
-    Problém není výstupní adresář, ale adresář DATABÁZE: čtení
-    WAL databáze vyžaduje vytvoření -shm souboru vedle ní, což
-    potřebuje právo zápisu do adresáře. Dokumentovaný scénář
-    (collect jako --user 0, report jako 65532) padal na
-    "attempt to write a readonly database" hned na prvním SELECTu.
-    Opraveno fallbackem na immutable režim s varováním; hlídá to
-    CI job "container-uid", který ten UID split reprodukuje.
-[ ] po doplnění digest pinu: build projde a
-    'docker buildx imagetools inspect' ukáže SBOM i provenance
+[ ] build s digest pinem projde a 'docker buildx imagetools inspect'
+    ukáže SBOM i provenance
 
 Ansible (SEC-034/035/036 mění výchozí chování):
 [ ] deploy.yml nyní NEBĚŽÍ jako root — ověřit, že
     elevate-linux --profile attribution dá kolektoru dost práv
 [ ] deploy_windows.yml nyní volá elevate-windows
-[ ] deploy.yml odmítne commatrix_version: "main" — je to záměr,
-    nastavit tag nebo commit SHA
+[ ] deploy.yml odmítne commatrix_version: "main" — je to záměr
 
 
-CO SE UDĚLALO (5 commitů na fix/review-medium)
+CO SE UDĚLALO (na větvi fix/review-medium)
 ==============================================
 
   commit                nálezy
@@ -116,6 +123,9 @@ CO SE UDĚLALO (5 commitů na fix/review-medium)
   Low/Info + threads    SEC-029, CODE-001 006 008 009 023 026 028 033,
                         průřezový drain loop
   Testy                 CODE-005 012 035
+  Ověření offline       visudo, systemd-analyze, Docker UID 65532;
+                        opraveno: topology profil, WAL read-only
+  Piny + doověření      SEC-033 040 044 doplněny; CODE-006 dodělána
 
 Metodika: každý regresní test byl ověřen dočasným revertem opravy.
 Test, který projde i na rozbitém kódu, nehlídá nic. Výjimky, kde
