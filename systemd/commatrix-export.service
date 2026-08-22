@@ -67,4 +67,3 @@ ProtectProc=invisible
 # here costs nothing; if you enable push, allow the central host explicitly
 #     IPAddressDeny=any
 #     IPAddressAllow=<central-ip>/32
-
