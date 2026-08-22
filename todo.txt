@@ -3,176 +3,136 @@ COMMATRIX — ZBÝVAJÍCÍ PRÁCE PO BEZPEČNOSTNÍ REVIZI
 
 Revize:     commatrix-review.pdf, 2026-07-22
 Revidováno: 344112e2ad063f546e61ada01a62f1c133f48d91
-Větev oprav: fix/review-344112e
-Stav testů: 244 passed, 1 skipped (výchozí stav byl 155)
+Větev oprav: fix/review-medium (navazuje na tag 1.1.0)
+Stav testů: 401 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
+Pokrytí:    71 % řádků balíčku commatrix
 
 Nálezů celkem 81: 5 Critical, 6 High, 38 Medium, 30 Low, 2 Info.
+Všechny jsou uzavřené v kódu. Zbývá pouze ověření na reálném stroji
+a jeden příkaz, který potřebuje síť (viz níže).
 
 
-HOTOVO
-======
+ZBÝVAJÍ POUZE DVĚ VĚCI
+======================
 
-Všechny Critical a High jsou uzavřené, plus nejzávažnější Mediumy.
+1) JEDEN PŘÍKAZ SE SÍTÍ — doplnění supply-chain pinů
+----------------------------------------------------
 
-  commit    nálezy
-  --------  ---------------------------------------------------------------
-  546a1ee   SEC-017 SEC-018
-  eebac68   SEC-030 SEC-031 SEC-032 CODE-032
-  33293cd   SEC-001 SEC-002 SEC-003 SEC-004 SEC-014 SEC-020 SEC-046
-  1a4daad   SEC-038 SEC-039
-  a831832   SEC-007 SEC-024 CODE-025 SEC-043 SEC-044(částečně)
-  ce8873f   SEC-005 SEC-006 SEC-008 SEC-022
-  6209926   CODE-002 CODE-015 CODE-018 CODE-019 CODE-021 CODE-022 CODE-031
-  7de47a3   SEC-010 SEC-011 SEC-016 SEC-019 CODE-003 CODE-004 CODE-020
+    python packaging/pin_supply_chain.py --write
 
-Mimo revizi, nalezeno při psaní testů:
-  - _node_id() neměl strop délky; 5000znakový peer_name generoval
-    5000znakové ID uzlu v každém řádku diagramu
-  - SEC-032 byla hlubší: sudoers mířil na skript v checkoutu vlastněném
-    lab uživatelem a ten strom se exportoval na PYTHONPATH pro root python.
-    Oprava samotného předávání argumentů by díru nezavřela.
-  - CODE-018/019 se týkala i topology_dot(), topology_mermaid()
-    a build_catalog(), které zpráva nezmiňuje
-  - CODE-015 mazala i bytes a observations, nejen first_seen/max_gap
-  - per-edge commit() v record_edge(): 1019 -> 45087 edges/s
+Vyřeší SEC-040 (GitHub Actions na SHA), SEC-044 (digest base image)
+a SEC-033 (SHA256 embedded Pythonu pro MSI). Skript sáhne na
+api.github.com, registry-1.docker.io a python.org, zapíše skutečné
+hodnoty do .github/workflows/*, Dockerfile a
+packaging/windows/python-embed-sha256.txt.
 
-Opravy ve zprávě:
-  - PoC u SEC-030 je chybný. Uvedená forma "1 + $(cmd)" skončí syntaktickou
-    chybou. Funguje až array-index: --cpu-percent 'a[$(cmd)]'
-  - SEC-005 tvrdí, že CAP_SYS_PTRACE je nutná pro cross-UID atribuci.
-    Naměřeno, že sama nestačí — potřeba je dvojice s CAP_DAC_READ_SEARCH.
-  - SEC-022 žádá ověřit PROCESS_QUERY_LIMITED_INFORMATION. Kód ho už
-    používal, takže grant SeDebugPrivilege nekupoval nic.
+Piny NEJSOU předvyplněné záměrně. Vymyšlený digest rozbije každý build
+a naučí všechny check obcházet — to je horší než žádný pin. Mechanismus
+i vynucení (CI job supply-chain-pins, offline) jsou hotové; chybí jen
+skutečné hodnoty, které nešly zjistit z prostředí bez přístupu k těmto
+službám.
+
+Po spuštění: zkontrolovat diff, commitnout. Dependabot
+(.github/dependabot.yml) už piny drží aktuální sám.
+
+CI job supply-chain-pins bude do té doby červený. To je záměr — je to
+přesně ten nález, který hlásí.
 
 
-NUTNO OVĚŘIT NA REÁLNÉM STROJI
-==============================
+2) OVĚŘENÍ NA REÁLNÉM STROJI
+-----------------------------
 
-Nic z toho nešlo otestovat v kontejneru.
+Nic z toho nešlo otestovat v kontejneru (chybí systemd, Windows,
+Docker daemon).
 
+Linux:
 [ ] visudo -cf na vygenerovaném /etc/sudoers.d/commatrix-control
 [ ] visudo -cf na vygenerovaném /etc/sudoers.d/commatrix-lab
 [ ] systemd-analyze security commatrix-collector.service
-    (samotné 'verify' prošlo s exit 0, 'security' potřebuje běžící systemd)
-[ ] elevate-linux --profile attribution: ověřit, že ProtectSystem=strict
-    + ReadWritePaths nekoliduje se StateDirectory v base unitě
-[ ] elevate-linux --profile topology: ověřit, jak moc se degraduje atribuce
-[ ] Windows: elevate-windows bez --allow-sedebug — funguje atribuce?
-[ ] Windows: opravený CPU governor (CODE-031). os.times() na Windows
-    nevrací children_*, měření by mělo fungovat, ale ověřené není.
-[ ] Docker: image s USER 65532 — bind-mount výstupní adresář musí být
-    zapisovatelný pro UID 65532, jinak report selže
+    ('verify' prošlo s exit 0, 'security' potřebuje běžící systemd)
+[ ] elevate-linux --profile attribution: ProtectSystem=strict
+    + ReadWritePaths vs. StateDirectory v base unitě
+[ ] elevate-linux --profile topology: jak moc se degraduje atribuce
+[ ] elevate-linux --revoke: nová kontrola CODE-008 hlásí, když se
+    unit User nevrátil na původní hodnotu — ověřit, že nehlásí
+    falešný poplach na běžné instalaci
+[ ] SIGTERM na commatrix serve: čisté ukončení, žádný uříznutý
+    /ingest zápis (CODE-006)
+
+Windows:
+[ ] elevate-windows bez --allow-sedebug — funguje atribuce?
+[ ] elevate-windows: registrace úlohy přes S4U XML (SEC-023).
+    Ověřit, že úloha po restartu skutečně naběhne pod účtem
+    'commatrix' bez uloženého hesla. Fallback na /rp se hlásí
+    warningem — pokud ho uvidíš, S4U selhalo.
+[ ] elevate-windows: po rebindu musí být DB zapisovatelná pro
+    servisní účet (SEC-025). Dříve to končilo Access Denied.
+[ ] opravený CPU governor (CODE-031) — os.times() na Windows
+[ ] WinDnsMonitor: bookmark podle EventRecordID (CODE-027) —
+    ověřit, že se DNS eventy přestaly duplikovat
+
+Docker:
+[ ] image s USER 65532 — bind-mount výstupního adresáře musí být
+    zapisovatelný pro UID 65532
+[ ] po doplnění digest pinu: build projde a
+    'docker buildx imagetools inspect' ukáže SBOM i provenance
+
+Ansible (SEC-034/035/036 mění výchozí chování):
+[ ] deploy.yml nyní NEBĚŽÍ jako root — ověřit, že
+    elevate-linux --profile attribution dá kolektoru dost práv
+[ ] deploy_windows.yml nyní volá elevate-windows
+[ ] deploy.yml odmítne commatrix_version: "main" — je to záměr,
+    nastavit tag nebo commit SHA
 
 
-ZBÝVÁ — MEDIUM
-==============
+CO SE UDĚLALO (5 commitů na fix/review-medium)
+==============================================
 
-Resource safety
-[ ] CODE-010  /proc walk se opakuje jednou na netns každý poll
-              sockets.py:133 — spočítat build_inode_to_pid() jednou za poll
-[ ] CODE-011  sériové subprocess volání package resolveru bez cap
-              processes.py:129 — burst 200 binárek = až 200x5 s stall
-[ ] CODE-013  DnsMonitor reconnect bez backoffu při čistém EOF
-              dns.py:201 — přesunout wait do finally
-[ ] CODE-014  až 8 sériových zabbix_get v refresh cyklu
-[ ] CODE-016  VACUUM po každé dávce při nedostatku místa
-[ ] CODE-027  WinDnsMonitor re-zaznamenává tytéž DNS eventy
-              winetw.py:113 — chybí bookmark, až ~3,4 mil. duplicit denně
-[ ] CODE-029  Job Object limity nekontrolují návratové BOOL
-              winresources.py:32 — "hard ceiling" může tiše neexistovat
+  commit                nálezy
+  --------------------  -------------------------------------------------
+  Resource safety       CODE-010 011 013 014 016 027 029, CODE-023,
+                        + schema_version guard
+  Correctness           CODE-017 030, SEC-026
+  Parsing/injection     SEC-009 012 013 015 021 023 025 027 028, CODE-026
+  Supply chain          SEC-033 034 035 036 037 040 041 042 044 045,
+                        CODE-034
+  Low/Info + threads    SEC-029, CODE-001 006 008 009 023 026 028 033,
+                        průřezový drain loop
+  Testy                 CODE-005 012 035
 
-Korektnost
-[ ] CODE-017  _ip_to_host předpokládá globálně unikátní IP
-              report.py:625 — 172.17.0.2 se ve fleetu opakuje napříč hosty,
-              vznikají falešné mezihostitelské hrany
-[ ] CODE-030  Windows data_quality počítáno globálně, ne per-edge
-
-Parsing / injection
-[ ] SEC-012   DNS varlink buffer bez size capu (dns.py:218) — cap 1 MiB
-[ ] SEC-013   RecursionError z hluboce zanořeného JSON zabíjí DNS vlákno
-[ ] SEC-015   zabbix_sender batch bez escapingu (zabbix.py:253)
-              aktuálně dead code, ale latentní
-[ ] SEC-021   markdown výstupy bez neutralizace HTML (__main__.py:349)
-[ ] SEC-026   GetExtendedTcpTable bez retry na ERROR_INSUFFICIENT_BUFFER
-[ ] SEC-028   XML parsing bez DTD hardeningu (winetw.py:42)
-
-Práva / ACL
-[ ] SEC-025   ACL DB nikdy neudělí servisní účet (perms.py:16)
-              po elevate-windows dostane úloha Access Denied a operátor to
-              "opraví" návratem na SYSTEM — regrese oprávnění
-[ ] SEC-023   heslo servisního účtu předáno přes argv (elevate.py:101)
-
-Cache
-[ ] SEC-009   SNI IP-name cache roste neomezeně (sni.py:214)
-[ ] SEC-027   totéž na Windows (winsni.py:76)
-
-Supply chain
-[ ] SEC-033   embedded Python při MSI buildu bez ověření SHA256
-[ ] SEC-034   ansible deploy implicitně jako root (group_vars/all.yml:9)
-[ ] SEC-035   deploy z mutable větve main bez pinningu
-[ ] SEC-036   Windows deploy nikdy nevolá elevate-windows
-[ ] SEC-040   GitHub Actions pinovány na mutable tagy, ne SHA
-[ ] SEC-041   release artefakty checksumovány, ale nepodepsány (cosign)
-[ ] SEC-042   kontejner bez SLSA provenance/SBOM
-[ ] SEC-044   base image digest pin — ZÁMĚRNĚ NEDOKONČENO
-              placeholder digest by rozbil build; správnou hodnotu je
-              potřeba vzít z registru:
-                docker buildx imagetools inspect python:3.12-slim \
-                  --format '{{.Manifest.Digest}}'
-              viz TODO(SEC-044) v Dockerfile
-
-Testy
-[ ] CODE-005  collector.py bez unit testů (nejkomplexnější modul)
-[ ] CODE-012  processes.py — PID/cgroup atribuce bez testů
-              fixture cgroup soubory: Docker, CRI-O, Podman, k8s, v1 i v2
-[ ] CODE-035  Windows perms/runtime/runloop/capture/winresources bez testů
+Metodika: každý regresní test byl ověřen dočasným revertem opravy.
+Test, který projde i na rozbitém kódu, nehlídá nic. Výjimky, kde
+revert-check nedává smysl, jsou označené přímo v testu:
+  - SEC-012: proti staré verzi se test ZASEKNE (nekonečná smyčka),
+    neselže — což je přesně ten nález.
 
 
-ZBÝVÁ — LOW / INFO
-==================
+POZNÁMKY K NÁLEZŮM, KTERÉ NEŠLY OPRAVIT PODLE ZPRÁVY
+=====================================================
 
-[ ] SEC-029   kernel32 volání bez argtypes/restype (winprocess.py:22)
-[ ] SEC-037   collect.yml používá win_shell s interpolací místo win_command
-[ ] SEC-045   SBOM.md tvrdí image SBOM, který CI nevytváří
-[ ] CODE-001  cmd_time/cmd_doh počítají posture dvakrát
-[ ] CODE-006  push server neošetřuje SIGTERM čistě
-[ ] CODE-008  unit_user_before zachyceno, ale nepoužito (elevate_linux.py:217)
-[ ] CODE-009  conntrack.is_root() bez hasattr(os,"geteuid") guardu
-[ ] CODE-023  duplikované/mrtvé konstanty (store.py DB_FILE_MODE)
-[ ] CODE-026  Windows SNI guard vynechává struct.error
-[ ] CODE-028  tasklist enumerace všech procesů každý poll
-[ ] CODE-033  _sub_file() neověří, že regex matchnul (version.py:38)
-[ ] CODE-034  changed_when vždy true -> rozbitá idempotence (deploy.yml:26)
+SEC-028 — obvyklý postup (handler na expat přes XMLParser.parser)
+  v Pythonu 3.9+ nefunguje: xml.etree ten atribut přestal vystavovat.
+  Kód napsaný tímhle způsobem tiše nedělá nic a vlastní test projde.
+  Ověřeno; nahrazeno odmítnutím DOCTYPE/ENTITY/NOTATION před parsováním
+  (v XML je '<' v datech vždy escapované, takže shoda je přesná).
 
+SEC-028 v praxi — samotný wrapper "<Events>" + text + "</Events>"
+  už DOCTYPE blokuje (syntaktická chyba). Hardening je tedy obrana do
+  hloubky, ne oprava aktivně zneužitelné díry. Test to reflektuje:
+  kontroluje _reject_dtd() přímo, ne přes wrapper.
 
-PRŮŘEZOVÉ ÚKOLY
-===============
+SEC-023 — heslo se z argv odstranilo úplně, ne jen zamaskovalo:
+  účet se zakládá PowerShellem přes stdin, úloha se registruje z XML
+  s LogonType=S4U, které heslo nepotřebuje. Staré cesty zůstaly jako
+  fallback a samy hlásí, že secret vystavují.
 
-[ ] Sjednotit vzorec "drain loop" u všech background vláken:
-      except Exception: log; continue
-    Opakující se příčina SEC-010/013/014 a CODE-026 je, že úzké except
-    klauzule pouští ValueError/RecursionError/struct.error a tiše zabíjejí
-    vlákno. Collector běží dál a nikdo si nevšimne, že přestal sbírat.
+SEC-034 — zpráva mluví o "deploy implicitně jako root". Skutečný
+  problém je, že root byl VÝCHOZÍ, čímž se na každém spravovaném
+  hostu zahodil celý least-privilege model nástroje. Výchozí je teď
+  servisní účet + capability set; root je explicitní opt-in.
 
-[ ] Sjednotit konstanty práv na jeden zdroj pravdy (CODE-023).
-
-[ ] Zvážit schema_version guard: _migrate() nečte meta.schema_version a
-    INSERT OR IGNORE znamená, že stará DB si navždy nese starou verzi.
-    Chybí i ochrana proti otevření novější DB starším binárem.
-
-[ ] Po dokončení Mediumů požádat o re-review — verdikt zprávy byl
-    "Vyžaduje nápravu, zatím nenasazovat do produkce".
-
-
-POZNÁMKA K METODICE
-===================
-
-Každý regresní test byl ověřen dočasným revertem opravy. Test, který
-projde i na rozbitém kódu, nehlídá nic — dvakrát se to během práce stalo
-a v obou případech to test odhalil až tenhle krok:
-
-  - test na SeDebug default procházel, protože mock vracel "ntrights
-    nenalezen" a volání se do self.calls nikdy nedostalo
-  - test na revoke obsahoval "or True", což je čistá vata
-
-Doporučuji držet stejný postup u zbývajících oprav.
+CODE-030 — bytes_sent/bytes_recv z iphlp jsou dnes vždy 0 (ESTATS
+  není implementované), takže have_bytes byl v praxi vždy False.
+  Oprava je přesto správná: přidán explicitní příznak 'accounted',
+  aby se 0 nedala zaměnit s "neptali jsme se". Až se ESTATS doplní,
+  per-edge logika už bude na místě.
