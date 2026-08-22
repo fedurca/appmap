@@ -89,6 +89,10 @@ The last items need a Windows host or registry access. They ship as scripts so t
 
 Note for anyone who verified an earlier build: the S4U task registration, the Sigstore step in the MSI build, and the ACL change that adds the service account are **new here**. They did not exist in 1.1.0, so earlier Windows testing does not cover them. The same applies to Ansible, where `deploy.yml` no longer runs the collector as root and refuses `commatrix_version: "main"`.
 
+Both runners have since been executed on real hardware and passed, so SEC-022, SEC-023, SEC-025, CODE-027 and CODE-031 are confirmed on a Windows host, and the container build, its attestations and the UID 65532 read path are confirmed against a working registry.
+
+**One item is still open, and the Windows runner cannot close it**: the MSI build's Sigstore verification against a real `.sigstore` bundle. That step lives in the release workflow's `msi` job, not in the elevate path, so it is exercised by cutting a release rather than by running the script. If the signature check fails there, the job fails and no MSI is published — which is the intent.
+
 ### Notes on the review itself
 
 - **SEC-028** could not be fixed the way it is usually written. The standard approach — hooking expat through `XMLParser.parser` — does nothing on Python 3.9+, because `xml.etree` no longer exposes that attribute; code written that way passes its own tests while providing no protection. Replaced with a pre-parse rejection of DOCTYPE/ENTITY/NOTATION markup.

@@ -4,7 +4,7 @@ COMMATRIX — ZBÝVAJÍCÍ PRÁCE PO BEZPEČNOSTNÍ REVIZI
 Revize:     commatrix-review.pdf, 2026-07-22
 Revidováno: 344112e2ad063f546e61ada01a62f1c133f48d91
 Větev oprav: fix/review-medium (navazuje na tag 1.1.0)
-Stav testů: 459 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
+Stav testů: 466 passed, 1 skipped (výchozí stav byl 155, po 1.1.0 244)
 Pokrytí:    ~72 % řádků balíčku commatrix
 
 Nálezů celkem 81: 5 Critical, 6 High, 38 Medium, 30 Low, 2 Info.
@@ -13,8 +13,11 @@ Nad rámec revize opraveny 4 chyby, které našlo až samotné ověřování
 (viz CHANGELOG) — poslední z nich, neexistující modul
 ansible.windows.win_fetch, byla v repu už před revizí.
 
-Zbývá jen to, co fyzicky potřebuje Windows stroj nebo přístup do
-container registry.
+Windows i kontejner OVĚŘENY na reálném stroji (2026-08-22, Roman):
+verify-windows.ps1 i verify-container.sh prošly bez chyby.
+
+Zbývá jediná položka — sigstore krok v MSI buildu, který uzavře první
+release. Detail níže.
 
 
 SUPPLY CHAIN — HOTOVO
@@ -110,52 +113,71 @@ Ansible: HOTOVO, a našlo to chybu starší než revize
 
     Hlídá CI job "ansible".
 
-Docker: ověřeno, co bez registry jde
--------------------------------------
+Docker: HOTOVO
+--------------
 [x] Dockerfile se naparsuje a BuildKit akceptuje digest-pinnutý FROM
 [x] `docker buildx build --check` prochází bez jediného varování
-    (spuštěno s dočasně nahrazeným FROM, protože proxy blokuje
-    registry-1.docker.io)
-[ ] skutečný build + attestace — potřebuje přístup do registry.
-    Spusť:  bash packaging/verify-container.sh
-    Pozn.: attestace nejdou přes výchozí "docker" driver (odmítne je);
-    skript si na to vytvoří docker-container builder a staví do OCI
-    layoutu, takže registry potřebuje jen pro base image.
+[x] skutečný build + attestace + UID 65532 na Romanově stroji
+    (packaging/verify-container.sh, prošlo bez chyby)
 
-Windows: ověřeno vše kromě skutečného stroje
----------------------------------------------
+Windows: HOTOVO
+---------------
 [x] S4U task XML: struktura ověřena proti dokumentovanému schématu
     Microsoftu — pořadí elementů v Task, Settings, Principal i Exec.
     Task Scheduler používá xsd:sequence, ne xsd:all, takže jinak
     naprosto validní XML se špatným pořadím registraci shodí.
-    Ověřen i escaping a to, že Actions Context odpovídá Principal id.
 [x] sigstore CLI: flagy --bundle / --cert-identity / --cert-oidc-issuer
     v sigstore 4.5.0 existují přesně v té podobě, jak je build volá
-Všechno níže pokrývá jeden skript — spusť ho v POVÝŠENÉM PowerShellu
-na testovacím stroji nebo VM se snapshotem (dělá reálné změny):
+[x] SEC-023 úloha registrovaná přes S4U XML, bez fallbacku na /rp
+[x] SEC-025 po rebindu je DB zapisovatelná pro servisní účet
+[x] SEC-022 atribuce funguje bez SeDebugPrivilege
+[x] CODE-031 CPU governor měří nenulovou hodnotu
+[x] CODE-027 DNS řádky nerostou skokově přes polly
+    (packaging/windows/verify-windows.ps1 na Romanově stroji,
+     prošlo bez chyby)
 
-    powershell -ExecutionPolicy Bypass -File packaging\windows\verify-windows.ps1
 
-    -DryRun   jen to, co nic nemění
-    -Revoke   vrátí stroj zpět
+JEDINÁ ZBÝVAJÍCÍ POLOŽKA
+========================
 
-[ ] SEC-023 úloha registrovaná přes S4U XML, LogonType=S4U,
-    UserId=commatrix, RunLevel=LeastPrivilege, a v outputu NENÍ
-    "falling back to 'schtasks /rp'" ani "falling back to 'net user'"
-[ ] SEC-025 po rebindu je DB zapisovatelná pro servisní účet
-    (Last Result úlohy musí být 0, ne 0x5)
-[ ] SEC-022 atribuce funguje bez SeDebugPrivilege
-[ ] CODE-031 CPU governor měří nenulovou hodnotu
-[ ] CODE-027 DNS řádky nerostou skokově přes polly
-[ ] MSI build: projde `python -m sigstore verify identity` proti
-    skutečnému .sigstore bundlu na windows-latest runneru?
-    (flagy ověřené proti sigstore 4.5.0, chybí jen reálný bundle)
+[ ] MSI build: `python -m sigstore verify identity` proti SKUTEČNÉMU
+    .sigstore bundlu z python.org.
 
-POZOR — tohle je NOVÝ kód, který v 1.1.0 neexistoval:
-  S4U registrace úlohy, Sigstore krok v MSI buildu, a ACL, které nově
-  přidává servisní účet. Dřívější ověření Windows buildu se na ně
-  nevztahuje. Stejně tak Ansible: deploy.yml už neběží jako root
-  a odmítne commatrix_version: "main".
+    Pozor: verify-windows.ps1 tohle NEPOKRÝVÁ a pokrýt nemůže — ten
+    krok žije v release workflow (job "msi" na windows-latest), ne
+    v elevate cestě. Ověřené je zatím jen to, že sigstore 4.5.0 má
+    přesně ty flagy, které build volá, a že trust anchor pro 3.12
+    existuje. Chybí jediné: že podpis proti reálnému bundlu projde.
+
+    Vyřeší se sám při prvním releasu:
+
+        git tag v1.2.0 && git push origin v1.2.0
+
+    Když by sigstore krok selhal, job "msi" spadne a release se
+    nedokončí — což je záměr: radši žádné MSI než MSI s neověřeným
+    interpretem. Nouzový ventil pro lokální experiment je
+    -AllowUnverifiedPython, do CI nepatří.
+
+    Případně bez tagu: spustit release workflow ručně přes
+    "Run workflow" s version 1.2.0-rc1 a podívat se na job "msi".
+
+
+DOPORUČENÝ DALŠÍ KROK
+=====================
+
+Požádat o re-review (poslední bod původního seznamu). Verdikt zprávy
+byl "Vyžaduje nápravu, zatím nenasazovat do produkce"; od té doby jsou
+uzavřené všechny nálezy včetně Low/Info, plus čtyři chyby, které našlo
+až samotné ověřování, plus jedna starší než revize (win_fetch).
+
+Podklady pro recenzenta:
+  - CHANGELOG.md, sekce [Unreleased] — co se změnilo a proč
+  - tenhle soubor — co bylo ověřeno a jak
+  - CI joby hardening / ansible / container-uid / supply-chain-pins —
+    kontroly, které dřív byly "ověřit ručně na reálném stroji"
+
+CHANGELOG má zatím [Unreleased]. Až budeš chtít, přejmenuj na 1.2.0
+a otaguj — tím se zároveň uzavře i poslední položka výše.
 
 
 CO SE UDĚLALO (na větvi fix/review-medium)
@@ -177,6 +199,8 @@ CO SE UDĚLALO (na větvi fix/review-medium)
   Piny + doověření      SEC-033 040 044 doplněny; CODE-006 dodělána
   Ansible ověřen        win_fetch (neexistující modul) opraven,
                         requirements.yml, syntax-check + lint v CI
+  Verifikační runnery   verify-windows.ps1, verify-container.sh
+                        (obojí prošlo na reálném stroji)
 
 Metodika: každý regresní test byl ověřen dočasným revertem opravy.
 Test, který projde i na rozbitém kódu, nehlídá nic. Výjimky, kde
