@@ -26,7 +26,7 @@
 # Refresh with:  python packaging/pin_supply_chain.py --write
 # Dependabot (docker ecosystem) opens the update PRs; the supply-chain-pins CI
 # job fails if the digest is ever dropped.
-FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 ARG VERSION=0.0.0
 LABEL org.opencontainers.image.title="commatrix" \
