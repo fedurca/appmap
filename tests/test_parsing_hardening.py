@@ -174,10 +174,7 @@ class MarkdownNeutralisationTest(unittest.TestCase):
 class WindowsAclTest(unittest.TestCase):
     """SEC-025."""
 
-    def test_service_account_is_granted(self):
-        self.assertIn("commatrix", perms._principals())
-
-    def test_restrict_grants_service_account_after_the_reset(self):
+    def test_restrict_grants_system_and_administrators(self):
         calls = []
 
         def _fake_run(args, **kwargs):
@@ -191,10 +188,6 @@ class WindowsAclTest(unittest.TestCase):
         granted = " ".join(" ".join(c) for c in calls)
         self.assertIn("SYSTEM:F", granted)
         self.assertIn("Administrators:F", granted)
-        self.assertIn(
-            "commatrix:F", granted,
-            "the account the collector runs as must keep access to its own DB",
-        )
 
     def test_directory_grants_use_inheritance_flags(self):
         calls = []
@@ -206,7 +199,8 @@ class WindowsAclTest(unittest.TestCase):
         with mock.patch("commatrix.platform.win.perms.subprocess.run", _fake_run):
             perms.restrict(r"C:\ProgramData\commatrix", is_dir=True)
         granted = " ".join(" ".join(c) for c in calls)
-        self.assertIn("commatrix:(OI)(CI)F", granted)
+        self.assertIn("SYSTEM:(OI)(CI)F", granted)
+        self.assertIn("Administrators:(OI)(CI)F", granted)
 
 
 class EventXmlHardeningTest(unittest.TestCase):

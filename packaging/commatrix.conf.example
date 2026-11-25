@@ -15,9 +15,6 @@ source = auto
 # Where pre-run nf_conntrack sysctl values are saved so they can be restored
 # after an unclean exit (systemd RuntimeDirectory).
 # sysctl_state_file = /run/commatrix/sysctl.state
-# Hard-require root. Off by default: commatrix runs unprivileged (the systemd
-# unit grants CAP_DAC_READ_SEARCH/CAP_NET_ADMIN instead of full root).
-require_root = false
 # Append-only IR history: log a "reactivated" event when an edge resumes
 # activity after being idle at least this many seconds (0 = only new edges).
 event_min_gap_seconds = 60
@@ -74,7 +71,7 @@ mode = auto
 netns = auto
 
 [sni]
-# Opt-in TLS ClientHello SNI capture (AF_PACKET, needs root/CAP_NET_RAW) to
+# Opt-in TLS ClientHello SNI capture (AF_PACKET, needs root) to
 # recover destination hostnames even when DNS is encrypted. Off by default.
 enabled = false
 # interface =

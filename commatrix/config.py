@@ -63,10 +63,6 @@ class Config:
     # Where pre-run nf_conntrack sysctl values are persisted so they can be
     # restored after an unclean exit (see conntrack.SysctlGuard).
     sysctl_state_file: str = "/run/commatrix/sysctl.state"
-    # By default commatrix runs unprivileged (topology is still captured;
-    # sysctl toggling and full process attribution then need CAP_NET_ADMIN /
-    # CAP_DAC_READ_SEARCH or root). Set true to hard-require root.
-    require_root: bool = False
     # Append-only IR history: log a "reactivated" event when an edge becomes
     # active again after being idle at least this many seconds (0 = only log
     # brand-new edges).
@@ -140,7 +136,7 @@ def _typed(sec, key, default, kind, section):
 
     CODE-021: configparser's getfloat/getint/getboolean raise ValueError on a
     malformed value, and nothing caught it -- so a single typo such as
-    ``require_root = enabled`` stopped the collector from starting at all,
+    ``poll_interval = enabled`` stopped the collector from starting at all,
     with a traceback rather than a diagnosis. A bad value now degrades to the
     default and says so.
     """
@@ -210,7 +206,6 @@ def load_config(path: Optional[str] = None) -> Config:
         cfg.source = sec.get("source", cfg.source)
         cfg.hostname = sec.get("hostname", cfg.hostname)
         cfg.sysctl_state_file = sec.get("sysctl_state_file", cfg.sysctl_state_file)
-        cfg.require_root = _typed(sec, "require_root", cfg.require_root, "bool", "collector")
         cfg.event_min_gap_seconds = _typed(sec, "event_min_gap_seconds", cfg.event_min_gap_seconds, "float", "collector")
 
     if parser.has_section("network"):

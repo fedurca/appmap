@@ -46,7 +46,9 @@ class WinPermsTest(unittest.TestCase):
 
         with mock.patch("commatrix.platform.win.perms.subprocess.run", _fake):
             # Returns False (not everything was granted) but must not raise.
-            self.assertFalse(perms.restrict(r"C:\data\c.db"))
+            self.assertFalse(
+                perms.restrict(r"C:\data\c.db", extra_principals=["commatrix"])
+            )
 
     def test_current_account_includes_the_domain_when_known(self):
         with mock.patch.dict(perms.os.environ,

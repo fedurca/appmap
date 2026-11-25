@@ -45,40 +45,14 @@ posbírat (Ansible) a sloučit do jednoho reportu za celou flotilu.
 
 ## 3. Nasazení na Linuxu
 
-### 3.1 Jednorázově jako systémová služba + ovládání uživatelem
+### 3.1 Instalace služby (vždy jako root)
 
 ```bash
-sudo ./packaging/install-service.sh            # nainstaluje službu (root) a deleguje ovládání
+sudo ./install.sh
+sudo ./install.sh --uninstall
 ```
 
-Nainstaluje systemd službu a povolí danému uživateli (výchozí `$SUDO_USER`) ji
-ovládat bez hesla přes `commatrix-ctl`:
-
-```bash
-commatrix-ctl status | start | stop | restart | logs | follow
-```
-
-Volby: `--user JMENO` (řídící uživatel), `--as-root` (běh pod rootem – nutné pro
-jistotu SNI a když polkit není k dispozici). Doporučený least-privilege postup
-bez rootu: po instalaci spusťte `sudo commatrix elevate-linux` (ambient caps +
-polkit DNS). Podrobnosti: [`elevace-cs.md`](elevace-cs.md).
-
-### 3.2 Přímá instalace služby
-
-```bash
-sudo ./install.sh                 # systémová služba (systemd)
-sudo ./install.sh --as-root       # běh pod rootem (režim 3)
-sudo commatrix elevate-linux      # režim 2: max bez rootu
-sudo ./install.sh --uninstall     # odebrat (+ revoke elevate)
-```
-
-### 3.3 Privilegia (co která úroveň umí)
-
-| Úroveň | Topologie | Byte county | Procesy jiných uživatelů | DNS log | SNI / netns |
-|---|---|---|---|---|---|
-| pod uživatelem | ano | omezeně (sock_diag) | ne | ne | ne |
-| elevate-linux (caps + polkit) | ano | ano | ano | ano | ano |
-| root (`--as-root`) | ano | ano | ano | ano | ano |
+Collector běží jako `User=root` se všemi právy.
 
 ---
 
@@ -90,15 +64,11 @@ Předpoklad: nainstalovaný Python 3.9+ a balíček commatrix (`pip install .`).
 
 ```powershell
 python -m commatrix install-windows
-python -m commatrix elevate-windows   # režim 2: dedicated user, bez Administrators
 ```
 
-`install-windows` zaregistruje startup task jako SYSTEM, vytvoří
-`%ProgramData%\commatrix\`. `elevate-windows` ho přepíše na účet `commatrix`
-(Event Log Readers, SeDebug pokud jde, ACL SYSTEM+commatrix). **SNI zůstává u
-režimu 3 (Admin/SYSTEM).** Podrobnosti: [`elevace-cs.md`](elevace-cs.md).
+`install-windows` zaregistruje startup task jako SYSTEM.
 
-Odebrání (včetně revoke elevate):
+Odebrání:
 
 ```powershell
 python -m commatrix uninstall-windows
@@ -167,7 +137,6 @@ nastavení; přepisujte jen co potřebujete. Nejdůležitější sekce:
 [collector]
 poll_interval = 5                 ; interval sběru (s)
 source = auto                     ; auto|procfs|conntrack-events|socket-diag|sockets
-require_root = false              ; true = běh jen jako root/Administrator
 
 [network]
 internal_cidrs = 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16

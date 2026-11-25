@@ -1,100 +1,18 @@
 [Unit]
-Description=Commatrix network flow collector (nf_conntrack)
-Documentation=https://example.com/commatrix
+Description=Commatrix network flow collector
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Runs UNPRIVILEGED by default. Instead of full root we grant only the two
-# capabilities the collector actually needs:
-#   * CAP_DAC_READ_SEARCH - read /proc/net/nf_conntrack and every /proc/<pid>/fd
-#                           (full process attribution across users)
-#   * CAP_NET_ADMIN       - toggle the nf_conntrack accounting/timestamp sysctls
-# The installer's --as-root flag switches this to User=root and drops the
-# capability lines for sites that prefer that.
-User=commatrix
-Group=commatrix
-AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_NET_ADMIN
-# Best-effort load of the connection tracking module (run as root via '+',
-# ignored via '-' if unavailable). commatrix itself reads the sysctls' original
-# values, enables them for the run and restores them on stop, so we deliberately
-# do NOT force the sysctl values here (that would hide the true pre-commatrix
-# baseline from the restore logic).
+User=root
 ExecStartPre=-+/sbin/modprobe nf_conntrack
 ExecStart=/usr/bin/commatrix collect --config /etc/commatrix/commatrix.conf
-# Belt-and-braces restore in case the main process was killed (SIGKILL/OOM)
-# and never ran its own shutdown restore. No-op when already restored.
 ExecStopPost=/usr/bin/commatrix restore-sysctls --config /etc/commatrix/commatrix.conf
 Restart=on-failure
 RestartSec=5
-
-# --- Resource safety: never hurt the host --------------------------------
-# Lowest scheduling priority so real workloads always win.
-Nice=19
-CPUSchedulingPolicy=idle
-IOSchedulingClass=idle
-CPUWeight=10
-IOWeight=10
-# Hard CPU ceiling. This defaults to 10% of ONE core; the installer replaces
-# it via a drop-in with 10% of TOTAL compute (10% * nproc). The in-process
-# governor also self-throttles to 10% of total compute.
-CPUQuota=10%
-# Memory ceiling (advisory; matches memory_max_mb in the config).
-MemoryMax=128M
-MemoryHigh=96M
-TasksMax=64
-
-# --- Light sandboxing (process still needs broad read access to /proc) ----
-# Compatible with AmbientCapabilities (systemd applies the ambient set before
-# exec and the kernel preserves it across no_new_privs). The '+'-prefixed
-# ExecStartPre above is unaffected by this and still runs as full root.
-NoNewPrivileges=true
-ProtectHome=true
-ProtectControlGroups=true
-ProtectKernelTunables=false
-UMask=0027
 RuntimeDirectory=commatrix
-RuntimeDirectoryMode=0750
 StateDirectory=commatrix
-StateDirectoryMode=0750
-
-# --- Generic confinement --------------------------------------------------
-# Verified with: systemd-analyze security --offline=true (systemd 255).
-# None of these restrict anything the collector does; leaving them off simply
-# left exposure on the table (this unit measured 6.4 MEDIUM without them).
-#
-# Deliberately NOT set here, do not "fix" the systemd-analyze findings for them:
-#   ProtectKernelTunables  - the collector's job is toggling the nf_conntrack
-#                            sysctls and restoring them in ExecStopPost; this
-#                            would remount /proc/sys read-only (already false
-#                            above, kept explicit).
-#   ProtectSystem=strict   - correct, but it needs to know which directories
-#                            the operator configured for the database, HTML
-#                            report and snapshots. 'commatrix elevate-linux'
-#                            reads the config and emits it together with the
-#                            matching ReadWritePaths; a static unit cannot.
-#   RestrictAddressFamilies - the collector legitimately needs AF_UNIX (the
-#                            resolved monitor), AF_NETLINK (ct-netlink and
-#                            sock_diag), AF_INET/AF_INET6 (SNTP, zabbix_get,
-#                            reverse DNS) and AF_PACKET when SNI capture is
-#                            enabled. An allow list that omits AF_PACKET
-#                            breaks SNI silently at runtime.
-#   UMask=0077             - the data is deliberately group-readable by the
-#                            'commatrix' group (0640/0750); systemd-analyze
-#                            flags this and it is the intended design.
-PrivateDevices=true
-ProtectHostname=true
-ProtectClock=true
-ProtectKernelLogs=true
-LockPersonality=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-RestrictNamespaces=true
-MemoryDenyWriteExecute=true
-SystemCallArchitectures=native
-RemoveIPC=true
 
 [Install]
 WantedBy=multi-user.target

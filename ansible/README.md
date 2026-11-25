@@ -43,11 +43,7 @@ Run only part of it with `deploy.yml`, `collect.yml` or `report.yml` directly.
 
 ## Notes
 
-- **Privileges:** `commatrix_run_as_root: true` (default) runs the service as
-  root so you get full cross-user process attribution, `nf_conntrack` byte
-  accounting and DNS query logging. Set it to `false` to run as the unprivileged
-  `commatrix` user (topology + per-socket bytes still work; DNS logging and
-  other-user attribution do not).
+- **Privileges:** the collector always runs as root (Linux) or SYSTEM (Windows).
 - **Snapshots, not raw files:** `collect.yml` uses `commatrix export` (a
   read-only, WAL-consistent JSON dump) rather than copying the live `.db`, so
   there are no locking/corruption issues.

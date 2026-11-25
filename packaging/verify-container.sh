@@ -8,9 +8,7 @@
 # Covers:
 #   SEC-044  the digest-pinned base image resolves and the image builds
 #   SEC-042  the build carries SLSA provenance and an SBOM
-#   UID      report/export work as the image's default UID 65532 against a
-#            database written by root -- the case that used to fail with
-#            "attempt to write a readonly database" on the first SELECT
+#   UID      image runs as root
 set -uo pipefail
 
 IMAGE="${IMAGE:-commatrix:verify}"
@@ -75,32 +73,9 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "== 3. the image runs as an unprivileged UID by default =="
+echo "== 3. the image runs as root =="
 UID_OUT="$(docker run --rm --entrypoint sh "$IMAGE" -c 'id -u' 2>/dev/null || true)"
-if [ "$UID_OUT" = "65532" ]; then pass "default UID is 65532"; else fail "default UID" "got '$UID_OUT'"; fi
-
-echo
-echo "== 4. read-only commands work on a root-written database =="
-# Exactly the documented split: collect as --user 0, report as the default UID.
-mkdir -p "$WORK/data"
-docker run --rm --user 0 -v "$WORK/data:/var/lib/commatrix" "$IMAGE" \
-    collect --allow-manual --iterations 1 \
-    --database /var/lib/commatrix/commatrix.db > "$WORK/collect.log" 2>&1 || true
-if [ ! -s "$WORK/data/commatrix.db" ]; then
-    fail "collect produced a database" "$(tail -5 "$WORK/collect.log")"
-else
-    pass "collect produced a database as root"
-    # The directory stays root-owned, which is the whole point of the test.
-    if docker run --rm -v "$WORK/data:/var/lib/commatrix" "$IMAGE" \
-           report -f markdown --database /var/lib/commatrix/commatrix.db \
-           > "$WORK/report.log" 2>&1; then
-        pass "report works as UID 65532 against a root-owned directory"
-        grep -qi "immutable" "$WORK/report.log" \
-            && echo "        (took the immutable fallback, as expected; warning shown)"
-    else
-        fail "report as UID 65532" "$(tail -5 "$WORK/report.log")"
-    fi
-fi
+if [ "$UID_OUT" = "0" ]; then pass "default UID is 0"; else fail "default UID" "got '$UID_OUT'"; fi
 
 echo
 if [ "$FAILS" -eq 0 ]; then

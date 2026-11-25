@@ -13,37 +13,34 @@ class CollectGateTest(unittest.TestCase):
             iterations=None,
             once=True,
             allow_manual=False,
-            require_root=False,
             verbose=False,
         )
         for k, v in kw.items():
             setattr(ns, k, v)
         return ns
 
-    def test_refuses_when_not_under_service(self):
+    def test_refuses_when_not_root(self):
         with mock.patch("commatrix.platform.is_privileged", return_value=False), \
+             mock.patch("commatrix.collector.run_loop") as run_loop:
+            rc = cli.cmd_collect(self._args(allow_manual=True))
+        self.assertEqual(rc, 1)
+        run_loop.assert_not_called()
+
+    def test_refuses_when_not_under_service(self):
+        with mock.patch("commatrix.platform.is_privileged", return_value=True), \
              mock.patch("commatrix.platform.running_as_service", return_value=False), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args())
         self.assertEqual(rc, 0)
         run_loop.assert_not_called()
 
-    def test_runs_unprivileged_with_allow_manual(self):
-        # Privilege is NOT required by default; unprivileged run is allowed.
-        with mock.patch("commatrix.platform.is_privileged", return_value=False), \
+    def test_runs_as_root_with_allow_manual(self):
+        with mock.patch("commatrix.platform.is_privileged", return_value=True), \
              mock.patch("commatrix.platform.running_as_service", return_value=False), \
              mock.patch("commatrix.collector.run_loop") as run_loop:
             rc = cli.cmd_collect(self._args(allow_manual=True))
         self.assertEqual(rc, 0)
         run_loop.assert_called_once()
-
-    def test_require_root_refuses_non_privileged(self):
-        with mock.patch("commatrix.platform.is_privileged", return_value=False), \
-             mock.patch("commatrix.platform.running_as_service", return_value=True), \
-             mock.patch("commatrix.collector.run_loop") as run_loop:
-            rc = cli.cmd_collect(self._args(require_root=True))
-        self.assertEqual(rc, 1)
-        run_loop.assert_not_called()
 
     def test_runs_under_service(self):
         with mock.patch("commatrix.platform.is_privileged", return_value=True), \

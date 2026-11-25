@@ -7,7 +7,7 @@ commatrix_repo: "https://github.com/fedurca/appmap.git"
 # the whole fleet on the next deploy with nothing to roll back to. Pin this to
 # a release tag or, better, a full commit SHA. Set commatrix_allow_mutable_ref
 # to true only for a lab where you deliberately want to track a branch.
-commatrix_version: "1.1.0"
+commatrix_version: "2.0.0"
 commatrix_allow_mutable_ref: false
 # Branch names that are explicitly treated as mutable. A full 40-character SHA
 # or an immutable release tag is what the guard expects instead.
@@ -18,24 +18,8 @@ commatrix_mutable_refs:
   - develop
 commatrix_src_dir: "/opt/commatrix/src"
 
-# SEC-034: privilege model for the deploy.
-#
-# The collector itself needs privileges (nf_conntrack sysctls, /proc/<pid>/fd
-# attribution, the resolved DNS monitor), but "the collector needs root" is not
-# the same statement as "the collector must run *as* root". install.sh --as-root
-# is the fallback; the default is the dedicated service user plus the ambient
-# capability set that elevate-linux grants, which is what the whole
-# least-privilege design of this tool is built around. Deploying as root by
-# default silently threw that away on every managed host.
-#
-# Set commatrix_run_as_root: true only where elevate-linux cannot be used.
-commatrix_run_as_root: false
-# Run 'commatrix elevate-linux' after install to grant the service user the
-# capability set it needs (see --profile below).
-commatrix_elevate: true
-# topology     - CAP_NET_ADMIN only; no cross-UID process attribution
-# attribution  - CAP_NET_ADMIN + CAP_DAC_READ_SEARCH; full attribution
-commatrix_elevate_profile: "attribution"
+# Collector always runs as root with full privileges.
+commatrix_run_as_root: true
 
 # Managed collector configuration (rendered into /etc/commatrix/commatrix.conf).
 commatrix_poll_interval: 5
@@ -54,15 +38,7 @@ commatrix_netns_scope: "auto"
 # Opt-in TLS ClientHello SNI capture (needs root/CAP_NET_RAW).
 commatrix_sni_enabled: false
 
-# --- Windows targets ------------------------------------------------------
-# SEC-036: run 'commatrix elevate-windows' after install so the scheduled task
-# leaves SYSTEM for the dedicated least-privilege account. Set to false only
-# where that account cannot be created.
-commatrix_windows_elevate: true
-# SeDebugPrivilege is a local escalation primitive and is NOT needed for
-# attribution (PROCESS_QUERY_LIMITED_INFORMATION is enough). Opt in only to
-# attribute protected (PPL) processes, and accept the residual risk.
-commatrix_windows_allow_sedebug: false
+# --- Windows targets: scheduled task as SYSTEM ---------------------------
 
 # --- control-node paths (pull + merge + report) --------------------------
 # Directory on the CONTROL node where snapshots, the merged DB and the report

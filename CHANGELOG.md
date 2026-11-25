@@ -2,6 +2,22 @@
 
 All notable changes to Commatrix are documented in this file.
 
+## [2.0.0] — 2026-11-25
+
+Root-only release. The collector always runs as root (Linux) or SYSTEM/Administrator (Windows) with full privileges.
+
+### Breaking
+
+- Removed `elevate-linux`, `elevate-windows`, capability profiles (`topology` / `attribution`), dedicated `commatrix` service user, polkit, and sudoers helpers.
+- `collect` refuses to start unless it is root/Administrator. Unprivileged “topology-only” mode is gone.
+- systemd units run as `User=root` with no capability bounding or sandbox drop-ins.
+- Docker image runs as root; live capture is documented with `--privileged`.
+- Ansible deploy installs as root and no longer calls elevate.
+
+### Kept
+
+- Collection, attribution, reports, push/serve (token still required), resource budgets, and the 1.1/1.2 correctness/security parser fixes that are not privilege-model code.
+
 ## [1.2.0] — 2026-08-22
 
 Medium/Low remediation. Deployed and running in production before tagging.

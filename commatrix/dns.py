@@ -7,11 +7,8 @@ returned.  We speak its tiny varlink protocol (NUL-terminated JSON over a Unix
 socket) using only the standard library — no packages.
 
 Limitations (documented for operators):
-- **Requires privileges.** The socket is connectable by anyone, but the
-  ``SubscribeQueryResults`` method is privileged; unprivileged callers get
-  ``InteractiveAuthenticationRequired``. Prefer ``commatrix elevate-linux``
-  (polkit grant for the service user) or run as root (``install.sh --as-root``).
-  When denied, the monitor
+- **Requires root.** The socket is connectable by anyone, but the
+  ``SubscribeQueryResults`` method is privileged. When denied, the monitor
   gives up gracefully and logs once.
 - Only queries that go through the *system* resolver are seen. Applications
   doing their own DoH/DoT (encrypted DNS, e.g. some browsers) bypass resolved
@@ -394,10 +391,8 @@ class DnsMonitor(threading.Thread):
                 self.auth_failed = True
                 self._stop.set()
                 log.warning(
-                    "DNS query logging needs privileges: systemd-resolved rejected "
-                    "the monitor subscription (%s). Run `commatrix elevate-linux` "
-                    "(polkit grant for the service user) or install as root "
-                    "(install.sh --as-root).",
+                    "DNS query logging needs root: systemd-resolved rejected "
+                    "the monitor subscription (%s).",
                     err,
                 )
             else:

@@ -112,20 +112,13 @@ class MutableRefGuardTest(unittest.TestCase):
 
 
 class PrivilegeDefaultsTest(unittest.TestCase):
-    """SEC-034 / SEC-036 defaults, read from the files Ansible actually loads."""
+    """Collector always runs as root / SYSTEM."""
 
     def setUp(self):
         self.allv = _load("group_vars/all.yml")
 
-    def test_linux_deploy_does_not_default_to_root(self):
-        self.assertFalse(self.allv["commatrix_run_as_root"])
-        self.assertTrue(self.allv["commatrix_elevate"])
-
-    def test_windows_deploy_drops_off_system_by_default(self):
-        self.assertTrue(self.allv["commatrix_windows_elevate"])
-
-    def test_sedebug_stays_opt_in(self):
-        self.assertFalse(self.allv["commatrix_windows_allow_sedebug"])
+    def test_linux_deploy_runs_as_root(self):
+        self.assertTrue(self.allv["commatrix_run_as_root"])
 
     def test_changed_when_survives_a_missing_stdout(self):
         """A skipped or stdout-less task must not blow up the expression."""

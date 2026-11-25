@@ -17,9 +17,6 @@ Subcommands:
 * ``time``        -- report time-sync posture and clock offset (NTP accuracy).
 * ``restore-sysctls`` -- restore nf_conntrack sysctls from the persisted state
   file (used by the systemd ExecStopPost hook / crash recovery).
-* ``elevate-linux`` -- grant ambient capabilities + polkit DNS to the service
-  account (least privilege; no root path).
-* ``elevate-windows`` -- dedicated service user + Event Log / SeDebug (no Admin).
 """
 
 from __future__ import annotations
@@ -67,30 +64,16 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.database:
         config.database = args.database
 
-    # Privilege is optional by default (topology is still captured). Only hard-
-    # require it when asked (full accounting / cross-user attribution).
-    require_root = args.require_root or config.require_root
-    if require_root and not _platform.is_privileged():
-        log.warning("privileged run required (--require-root/require_root) but not "
-                    "running as root/Administrator; refusing to start")
+    if not _platform.is_privileged():
+        log.error("collect requires root (Linux) or Administrator (Windows)")
         return 1
 
-    # By design commatrix runs as a service (systemd on Linux, a SYSTEM startup
-    # task on Windows), which also enforces resource limits. Refuse otherwise
-    # unless explicitly overridden for labs/testing.
     if not _platform.running_as_service() and not args.allow_manual:
         log.warning(
             "commatrix collect is intended to run as a service; not started by "
             "the service manager and --allow-manual not given - doing nothing"
         )
         return 0
-
-    if not _platform.is_privileged():
-        log.info(
-            "running unprivileged: topology is captured; full byte accounting, "
-            "event-driven capture and cross-user/namespace attribution need "
-            "root/Administrator (or the documented capabilities)"
-        )
 
     iterations = 1 if args.once else args.iterations
     run_loop(config, iterations=iterations)
@@ -135,71 +118,14 @@ def cmd_uninstall_windows(args: argparse.Namespace) -> int:
     if not _platform.IS_WINDOWS:
         log.error("uninstall-windows is only for Windows hosts")
         return 1
-    from .platform.win import elevate, runtime
+    from .platform.win import runtime
 
     if not runtime.is_admin():
         log.error("uninstall-windows requires Administrator privileges")
         return 1
-    # Best-effort revoke of elevate-windows grants before deleting the task.
-    try:
-        rev = elevate.revoke_elevate(dry_run=False)
-        for line in rev.actions:
-            log.info("elevate revoke: %s", line)
-        for line in rev.warnings:
-            log.warning("elevate revoke: %s", line)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("elevate-windows revoke skipped: %s", exc)
     ok = runtime.uninstall_service()
     log.info("windows service %s", "removed" if ok else "removal reported an error")
     return 0 if ok else 1
-
-
-def cmd_elevate_linux(args: argparse.Namespace) -> int:
-    from . import platform as _platform
-    from .elevate_linux import DEFAULT_STATE_FILE, apply_elevate, revoke_elevate
-
-    log = logging.getLogger("commatrix")
-    if not _platform.IS_LINUX:
-        log.error("elevate-linux is only for Linux hosts")
-        return 1
-    state = args.state_file or DEFAULT_STATE_FILE
-    if args.revoke:
-        result = revoke_elevate(state_file=state, dry_run=args.dry_run)
-    else:
-        # Pass the resolved config so the drop-in can grant ReadWritePaths for
-        # a database / report / snapshot directory the operator moved outside
-        # /var/lib/commatrix; ProtectSystem=strict would otherwise make it
-        # read-only and the collector would fail at its first write.
-        result = apply_elevate(
-            state_file=state, dry_run=args.dry_run, profile=args.profile,
-            config=load_config(args.config),
-        )
-    _write_output(result.summary_markdown(), args.output)
-    return 0 if result.ok else 1
-
-
-def cmd_elevate_windows(args: argparse.Namespace) -> int:
-    from . import platform as _platform
-
-    log = logging.getLogger("commatrix")
-    if not _platform.IS_WINDOWS:
-        log.error("elevate-windows is only for Windows hosts")
-        return 1
-    from .platform.win import elevate
-
-    if args.revoke:
-        result = elevate.revoke_elevate(
-            state_file=args.state_file, dry_run=args.dry_run,
-        )
-    else:
-        result = elevate.apply_elevate(
-            state_file=args.state_file,
-            dry_run=args.dry_run,
-            config_path=args.config,
-            allow_sedebug=args.allow_sedebug,
-        )
-    _write_output(result.summary_markdown(), args.output)
-    return 0 if result.ok else 1
 
 
 def cmd_restore_sysctls(args: argparse.Namespace) -> int:
@@ -547,11 +473,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow running outside systemd (labs/testing)",
     )
-    p_collect.add_argument(
-        "--require-root",
-        action="store_true",
-        help="refuse to start unless running as root",
-    )
     p_collect.set_defaults(func=cmd_collect)
 
     p_winsvc = sub.add_parser("install-windows", help="install as a Windows startup task (SYSTEM)")
@@ -562,51 +483,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_winunsvc = sub.add_parser("uninstall-windows", help="remove the Windows startup task")
     _add_common(p_winunsvc)
     p_winunsvc.set_defaults(func=cmd_uninstall_windows)
-
-    p_elev_l = sub.add_parser(
-        "elevate-linux",
-        help="grant ambient caps + polkit DNS to the service user",
-    )
-    _add_common(p_elev_l)
-    p_elev_l.add_argument("--revoke", action="store_true", help="restore previous privileges")
-    p_elev_l.add_argument("--dry-run", action="store_true", help="show actions without changing the host")
-    p_elev_l.add_argument("--state-file", help="path to elevate state JSON")
-    p_elev_l.add_argument(
-        "--profile",
-        choices=("topology", "attribution"),
-        default="attribution",
-        help="capability profile. 'topology' grants only CAP_NET_ADMIN and "
-        "CAP_NET_RAW: flows and services are still collected, but NO socket "
-        "owned by another user is attributed to a process -- measured 8%% "
-        "attribution coverage versus 92%% with the default, and 0%% for "
-        "other users' sockets. Treat it as topology-only. 'attribution' "
-        "(default) adds CAP_DAC_READ_SEARCH + CAP_SYS_PTRACE, which together "
-        "are read-equivalent to root over the whole host. Measure it on your "
-        "own host with packaging/measure_attribution.py",
-    )
-    p_elev_l.add_argument("-o", "--output", help="write markdown summary to file")
-    p_elev_l.set_defaults(func=cmd_elevate_linux)
-
-    p_elev_w = sub.add_parser(
-        "elevate-windows",
-        help="dedicated service user + Event Log access (no Administrators)",
-    )
-    _add_common(p_elev_w)
-    p_elev_w.add_argument("--revoke", action="store_true", help="restore previous privileges")
-    p_elev_w.add_argument("--dry-run", action="store_true", help="show actions without changing the host")
-    p_elev_w.add_argument("--state-file", help="path to elevate state JSON")
-    p_elev_w.add_argument(
-        "--allow-sedebug",
-        dest="allow_sedebug",
-        action="store_true",
-        help="also grant SeDebugPrivilege. Off by default: it permits "
-        "OpenProcess(PROCESS_ALL_ACCESS) on SYSTEM processes and is a "
-        "reliable escalation to SYSTEM. Attribution uses "
-        "PROCESS_QUERY_LIMITED_INFORMATION and does not need it; enable only "
-        "to attribute protected (PPL) processes",
-    )
-    p_elev_w.add_argument("-o", "--output", help="write markdown summary to file")
-    p_elev_w.set_defaults(func=cmd_elevate_windows)
 
     p_restore = sub.add_parser(
         "restore-sysctls",

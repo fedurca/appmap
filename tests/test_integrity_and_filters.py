@@ -169,12 +169,11 @@ class ConfigRobustnessTests(unittest.TestCase):
 
     def test_malformed_values_fall_back_to_defaults(self):
         path = self._write(
-            "[collector]\nrequire_root = enabled\npoll_interval = every 5s\n"
+            "[collector]\npoll_interval = every 5s\n"
             "[resources]\nmemory_max_mb = lots\n"
         )
         with self.assertLogs("commatrix.config", level=logging.WARNING):
             cfg = load_config(path)
-        self.assertFalse(cfg.require_root)
         self.assertEqual(cfg.poll_interval, 5.0)
         self.assertEqual(cfg.memory_max_mb, 128)
 

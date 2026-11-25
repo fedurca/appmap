@@ -1,7 +1,7 @@
 """Regression tests for the supply-chain findings.
 
 SEC-033  the MSI build verifies the embedded Python archive
-SEC-034  the Ansible deploy does not run the collector as root by default
+SEC-034  (superseded in 2.0.0: collector always runs as root)
 SEC-035  the deploy refuses a mutable git ref unless asked
 SEC-036  the Windows deploy drops the task off SYSTEM
 SEC-037  Windows tasks use win_command, not interpolated win_shell
@@ -168,13 +168,12 @@ class AnsibleHardeningTest(unittest.TestCase):
         except ImportError:
             self.skipTest("PyYAML not installed")
 
-    def test_deploy_does_not_default_to_root(self):
+    def test_deploy_runs_as_root(self):
         allv = _yaml("ansible", "group_vars", "all.yml")
-        self.assertFalse(
+        self.assertTrue(
             allv["commatrix_run_as_root"],
-            "the collector must not run as root by default (SEC-034)",
+            "the collector always runs as root",
         )
-        self.assertTrue(allv["commatrix_elevate"])
 
     def test_version_is_not_a_mutable_branch(self):
         allv = _yaml("ansible", "group_vars", "all.yml")
@@ -193,13 +192,9 @@ class AnsibleHardeningTest(unittest.TestCase):
             f"expected a guard task, got {names}",
         )
 
-    def test_deploy_runs_elevate_linux(self):
-        text = _read("ansible", "deploy.yml")
-        self.assertIn("elevate-linux", text)
-
-    def test_windows_deploy_runs_elevate_windows(self):
-        text = _read("ansible", "deploy_windows.yml")
-        self.assertIn("elevate-windows", text)
+    def test_deploy_does_not_call_elevate(self):
+        self.assertNotIn("elevate-linux", _read("ansible", "deploy.yml"))
+        self.assertNotIn("elevate-windows", _read("ansible", "deploy_windows.yml"))
 
     def test_no_win_shell_with_interpolation(self):
         for name in ("deploy_windows.yml", "collect.yml", "report.yml",

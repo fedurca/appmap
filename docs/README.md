@@ -15,7 +15,7 @@
 
 ## Deployment
 
-- Linux: [`../install.sh`](../install.sh), [`../packaging/install-service.sh`](../packaging/install-service.sh)
+- Linux: [`../install.sh`](../install.sh) (systemd, runs as root)
 - Windows: `commatrix install-windows`, SCCM package
   [`../packaging/windows/`](../packaging/windows)
 - Fleet (Ansible): [`../ansible/README.md`](../ansible/README.md)
